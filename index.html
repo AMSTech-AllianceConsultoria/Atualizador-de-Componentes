@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TAX4B – Versões por Objeto</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    body{margin:24px}
+    .header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+    .header img{height:36px;width:auto}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+    select,button{padding:10px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px;background:#fff;cursor:pointer}
+    .header .right{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .header .envwrap{display:flex;align-items:center;gap:6px}
+    .header label{font-size:13px;color:#444}
+    .header select#envSelectHeader{min-width:260px;max-width:360px}
+    .versions{display:inline-flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .chip{border:1px solid #bbb;border-radius:999px;padding:4px 10px;font-size:13px}
+    a.btn,button.btn{display:inline-block;text-decoration:none;border:1px solid #ccc;border-radius:8px;padding:10px 12px;background:#fff;cursor:pointer}
+    small{color:#666}
+    .muted{color:#666}
+    .pre{white-space:pre-wrap;background:#0b0b0b;color:#e7e7e7;border:1px solid #222;border-radius:8px;padding:10px;font-size:12px}
+    .value{display:inline-block;border:1px dashed #d1d5db;border-radius:8px;padding:8px 10px;font-size:14px;background:#fcfcfd}
+    .badge{display:inline-block;border-radius:6px;padding:2px 6px;font-size:12px;border:1px solid #bbb;background:#f6f6f8}
+
+    /* Two-column layout */
+    .layout{display:grid;grid-template-columns: 1fr minmax(420px, 40%);gap:16px;align-items:start}
+    @media (max-width: 980px){ .layout{grid-template-columns: 1fr} }
+
+    #leftPane{min-width:0}
+    #rightPane{min-width:0;position:sticky;top:16px;align-self:start;height: calc(100vh - 80px);display:flex;flex-direction:column}
+    #deployHeader{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+    #deployWrap{display:none;flex:1;min-height:260px}
+    #deployBox{flex:1;overflow:auto;border-radius:10px}
+    table{border-collapse:collapse;width:100%}
+    th,td{padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:left}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="/static/logo.png" alt="Alliance Consultoria" onerror="this.style.display='none'">
+    <strong>TAX4B – Versões por Objeto</strong>
+    <div class="right">
+      <a class="btn" href="/environments" title="Cadastro de Ambientes">Ambientes (Empresas)</a>
+      <div class="envwrap">
+        <label for="envSelectHeader"><strong>Empresa/Ambiente:</strong></label>
+        <select id="envSelectHeader" title="Selecione a empresa/ambiente cadastrado"></select>
+      </div>
+      <button id="btnLogout" class="btn" title="Sair">Sair</button>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div id="leftPane">
+      <div class="row" id="rowUpdate">
+        <button id="btnUpdate">Atualizar do repositório</button>
+        <small id="msg"></small>
+      </div>
+
+      <div class="row">
+        <label for="objSelect"><strong>Objeto:</strong></label>
+        <button id="btnShow">Listar versões</button>
+        <button id="btnDeploy" title="Baixar última versão e fazer deploy">Atualizar (deploy)</button>
+      </div>
+
+      <div id="output">
+        <h3 id="title" class="muted">Selecione um objeto para ver as versões.</h3>
+        <div class="versions" id="versions"></div>
+        <div id="envStatus" style="margin-top:16px;"></div>
+
+        <div class="row" style="margin-top:10px">
+          <button id="btnOverview" title="Carregar status de todos os objetos no ambiente">Carregar status do ambiente</button>
+        </div>
+
+        <div id="overviewWrap" style="display:none;margin-top:8px">
+          <table id="overviewTable">
+            <thead>
+              <tr>
+                <th>Objeto</th>
+                <th>Versão (ambiente)</th>
+                <th>Versão (repositório)</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="rightPane">
+      <div id="deployHeader">
+        <strong>Deploy (tempo real)</strong>
+        <span id="deployStatus" class="badge">parado</span>
+      </div>
+      <div id="deployWrap">
+        <div id="deployBox" class="pre"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  var $ = function(s){ return document.querySelector(s); };
+
+  async function refreshEnvList(){
+    var r = await fetch('/api/environments');
+    if(r.status===401){ location.href='/login'; return; }
+    var d = await r.json();
+    var sel = $('#envSelectHeader');
+    sel.innerHTML = '';
+
+    var ph = document.createElement('option');
+    ph.value='';
+    ph.textContent='Selecione uma empresa/ambiente...';
+    ph.selected=true;
+    sel.appendChild(ph);
+
+    (d.items||[]).forEach(function(env){
+      var label = (env.name || '');
+      if (env.space && env.space.trim() !== '') label += ' — ' + env.space.trim();
+      var o = document.createElement('option');
+      o.value = String(env.id);
+      o.textContent = label.trim();
+      sel.appendChild(o);
+    });
+  }
+
+  async function refreshAppsList(){
+    var r = await fetch('/api/apps');
+    if(r.status===401){ location.href='/login'; return; }
+    var d = await r.json();
+    var sel = $('#objSelect');
+    sel.innerHTML = '';
+
+    var ph = document.createElement('option');
+    ph.value='';
+    ph.textContent='Selecione um objeto...';
+    ph.selected=true;
+    sel.appendChild(ph);
+
+    (d.items||[]).forEach(function(id){
+      var o = document.createElement('option');
+      o.value=id; o.textContent=id;
+      sel.appendChild(o);
+    });
+  }
+
+  async function showVersions(){
+    var id = $('#objSelect').value;
+    var title = $('#title');
+    var box = $('#versions');
+    var envBox = $('#envStatus');
+
+    if(!id){
+      title.textContent='Selecione um objeto para ver as versões.';
+      box.innerHTML=''; envBox.innerHTML='';
+      return;
+    }
+
+    var r = await fetch('/api/versions/'+encodeURIComponent(id));
+    if(r.status===401){ location.href='/login'; return; }
+    var d = await r.json();
+
+    title.textContent=id;
+    box.innerHTML='';
+    (d.versions||[]).forEach(function(v){
+      var s = document.createElement('span');
+      s.className='chip'; s.textContent=v; box.appendChild(s);
+    });
+    if((d.versions||[]).length===0) box.innerHTML='<small>Nenhuma versão encontrada.</small>';
+
+    var envId = $('#envSelectHeader').value;
+    if(!envId){
+      envBox.innerHTML='<small class="muted">Selecione uma Empresa/Ambiente no topo para verificar a versão no ambiente.</small>';
+      return;
+    }
+
+    var pass = prompt('Digite a senha do usuário do ambiente selecionado:');
+    if (pass === null) {
+      envBox.innerHTML='<small class="muted">Consulta ao ambiente cancelada.</small>';
+      return;
+    }
+    envBox.innerHTML='<small class="muted">Consultando ambiente…</small>';
+
+    try{
+      var rr = await fetch('/api/object-env-status', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ envId: envId, objectId: id, password: pass })
+      });
+      var jj = await rr.json();
+      if (!jj.ok){
+        envBox.innerHTML = '<div class="pre">Erro: ' + (jj.error || 'Falha na consulta') + '</div>';
+        return;
+      }
+      envBox.innerHTML = '';
+      var label = document.createElement('div');
+      label.innerHTML = '<strong>Versão no ambiente:</strong> ';
+      var val = document.createElement('span');
+      val.className = 'value';
+      val.textContent = jj.clientVersion || 'Não encontrado no ambiente';
+      label.appendChild(val);
+      envBox.appendChild(label);
+    }catch(e){
+      envBox.innerHTML = '<div class="pre">Erro: ' + (e.message||e) + '</div>';
+    }
+  }
+
+  async function startDeploy(objectId, envId, pass){
+    var r = await fetch('/api/deploy-start', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ envId: envId, objectId: objectId, password: pass })
+    });
+    var j = await r.json();
+    if(!j.ok){ alert(j.error || 'Falha ao iniciar deploy'); return; }
+
+    $('#deployWrap').style.display='block';
+    $('#deployBox').textContent='';
+    $('#deployStatus').textContent='executando';
+    var es = new EventSource('/api/deploy-stream?token=' + encodeURIComponent(j.token));
+    es.onmessage = function(ev){
+      var box = $('#deployBox');
+      box.textContent += ev.data + '\n';
+      box.scrollTop = box.scrollHeight;
+    };
+    es.addEventListener('done', function(ev){
+      $('#deployStatus').textContent = 'finalizado';
+      try{
+        var payload = JSON.parse(ev.data||'{}');
+        if(payload.ok){
+          $('#deployBox').textContent += '\n==> Deploy finalizado com sucesso.';
+        }else{
+          $('#deployBox').textContent += '\n==> Deploy finalizado com erro.';
+        }
+      }catch(_){}
+      es.close();
+    });
+    es.onerror = function(){
+      $('#deployStatus').textContent = 'erro';
+      es.close();
+    };
+  }
+
+  document.addEventListener('click', function(e){
+    if(e.target && e.target.id === 'btnDeploy'){
+      var objectId = $('#objSelect').value;
+      var envId = $('#envSelectHeader').value;
+      if(!objectId){ alert('Selecione um objeto.'); return; }
+      if(!envId){ alert('Selecione uma empresa/ambiente.'); return; }
+      var pass = prompt('Senha do usuário do ambiente para efetuar o deploy:');
+      if (pass === null){ return; }
+      startDeploy(objectId, envId, pass);
+    }
+  });
+
+  document.getElementById('btnUpdate').addEventListener('click',async function(){
+    $('#msg').textContent='Atualizando…';
+    try{
+      var r=await fetch('/api/update-apps');
+      if(r.status===401){location.href='/login';return;}
+      var d=await r.json();
+      if(d.ok){
+        $('#msg').textContent='Atualizado: '+d.updated+' apps';
+        await refreshAppsList();
+        if($('#objSelect').value) await showVersions();
+      }else{
+        $('#msg').textContent='Falha na atualização.'; alert(JSON.stringify(d));
+      }
+    }catch(e){
+      $('#msg').textContent='Erro na atualização.'; alert(e.message||e);
+    }
+  });
+  document.getElementById('btnShow').addEventListener('click',showVersions);
+  document.getElementById('objSelect').addEventListener('change',showVersions);
+  document.getElementById('envSelectHeader').addEventListener('change', function(){
+    if($('#objSelect').value){ showVersions(); }
+  });
+  document.getElementById('btnLogout').addEventListener('click',async function(){
+    await fetch('/api/logout',{method:'POST'}); location.href='/login';
+  });
+
+  document.getElementById('btnOverview').addEventListener('click', async function(){
+    var envId = $('#envSelectHeader').value;
+    if(!envId){ alert('Selecione uma empresa/ambiente.'); return; }
+    var pass = prompt('Senha do usuário do ambiente para consulta:');
+    if (pass === null) return;
+    try{
+      var r = await fetch('/api/overview', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ envId: envId, password: pass })
+      });
+      var j = await r.json();
+      if(!j.ok){ alert(j.error || 'Falha ao carregar overview'); return; }
+      var tb = document.querySelector('#overviewTable tbody');
+      tb.innerHTML = '';
+      (j.items || []).forEach(function(it){
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + (it.id || '') + '</td>' +
+          '<td>' + (it.prev_version || '-') + '</td>' +
+          '<td>' + (it.repo_version || '-') + '</td>' +
+          '<td><button class="btnDeployRow" data-id="' + it.id + '">Deploy</button></td>';
+        tb.appendChild(tr);
+      });
+      document.getElementById('overviewWrap').style.display = 'block';
+
+      document.querySelectorAll('.btnDeployRow').forEach(function(btn){
+        btn.addEventListener('click', function(e){
+          var objectId = e.target.getAttribute('data-id');
+          var envId = $('#envSelectHeader').value;
+          if(!objectId || !envId) return alert('Selecione ambiente/objeto');
+          startDeploy(objectId, envId, pass);
+        });
+      });
+    }catch(e){
+      alert(e.message || e);
+    }
+  });
+
+  refreshEnvList();
+  refreshAppsList();
+</script>
+</body>
+</html>
