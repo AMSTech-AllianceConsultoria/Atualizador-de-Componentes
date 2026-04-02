@@ -3993,6 +3993,30 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
         return String(id || '').trim();
       }
 
+      // Produção: não valida dependências e não adiciona componentes extras.
+      // Apenas executa exatamente o que foi selecionado, na mesma ordem.
+      try{
+        var __stage = (typeof __getSelectedEnvStage === 'function') ? __getSelectedEnvStage() : null;
+        if (typeof __isProdStage === 'function' && __isProdStage(__stage)) {
+          var baseDeps = {};
+          var baseRequiredBy = {};
+          orderedSelected.forEach(function(id){
+            var k = normalizeComp(id);
+            baseDeps[k] = [];
+            baseRequiredBy[k] = [];
+          });
+          return {
+            selectedIds: orderedSelected.slice(),
+            order: orderedSelected.slice(),
+            autoAdded: [],
+            depsOf: baseDeps,
+            requiredBy: baseRequiredBy,
+            cycles: [],
+            missingMeta: {}
+          };
+        }
+      }catch(_e){}
+
       var graphEdges = [];
       try{
         var graphResp = await fetch('/api/dependency-graph');
@@ -4276,7 +4300,8 @@ document.querySelectorAll('#overviewTable .btnDeployRow').forEach(function(btn){
 
         // === Pré-validação de dependências antes do deploy (skip em PRD) ===
         const __st = (typeof __getSelectedEnvStage==='function' ? __getSelectedEnvStage() : null);
-        if (__st !== 'PRD') {
+        const __stNorm = String(__st || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+        if (!['PRD','PROD','PRODUCAO','PRODUCTION'].includes(__stNorm)) {
         try {
           const envSelForCheck = document.getElementById('envSelectHeader');
           const envIdCheck = envSelForCheck && envSelForCheck.value ? envSelForCheck.value : envId;
@@ -6387,8 +6412,9 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
       let __hmlVersionForObject = null;
 
       // Se o ambiente selecionado é PRD, precisamos buscar a versão na HML correspondente
-      const stage = (env && env.stage ? String(env.stage).toUpperCase() : '');
-      if (stage === 'PRD') {
+      const stage = (env && env.stage ? String(env.stage).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'') : '');
+      const isProdStage = ['PRD','PROD','PRODUCAO','PRODUCTION'].includes(stage);
+      if (isProdStage) {
         __forceVersionFromHml = true;
 
         const envName = String(env.name || '').trim();
@@ -6448,6 +6474,27 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
               break;
             }
           }
+
+          // fallback: tenta pela empresa/ambiente gravados no histórico local
+          if (!found) {
+            const empresaBase = rootName || String(hmlEnv.name || '').replace(/\s*-\s*(HML|QAS|HOMOLOG(?:ACAO|AÇÃO)?)\s*$/i, '').trim();
+            const ambientesHml = ['HML','QAS','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
+            for (const amb of ambientesHml) {
+              const r = await this.appsSvc.db.get(
+                `SELECT version FROM installed_apps
+                 WHERE LOWER(component) = ?
+                   AND LOWER(COALESCE(empresa,'')) = LOWER(?)
+                   AND UPPER(COALESCE(ambiente,'')) = ?
+                 ORDER BY datetime(installed_at) DESC LIMIT 1`,
+                [compKey, empresaBase, String(amb)]
+              );
+              if (r && r.version) {
+                found = String(r.version).trim();
+                break;
+              }
+            }
+          }
+
           if (found) {
             __hmlVersionForObject = found;
           }
@@ -6580,8 +6627,13 @@ async deployStream(req,res){
     // 4) Descobrir versão a usar
     let repoVersion = null;
 
-    // 4.a) Se o token já trouxe a versão da HML, usa direto
-    if (info.forceVersionFromHml && info.hmlVersionForObject) {
+    // 4.a) Produção: usa obrigatoriamente a mesma versão da Homologação.
+    if (info.forceVersionFromHml) {
+      if (!info.hmlVersionForObject) {
+        send('Produção: não foi possível identificar a versão instalada em Homologação para este componente. Operação cancelada.');
+        sendDone({ ok:false, code:'no_hml_version' });
+        return res.end();
+      }
       repoVersion = String(info.hmlVersionForObject).trim();
       send('Produção: usando versão da Homologação já resolvida: ' + repoVersion);
     } else {
@@ -7635,6 +7687,13 @@ async renderHome(req,res){
   async validateInstall(req,res){
     try{
       const target = req.params.target;
+      try {
+        const env = await this.envSvc.getById(Number(target));
+        const stage = String((env && env.stage) || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+        if (['PRD','PROD','PRODUCAO','PRODUCTION'].includes(stage)) {
+          return res.json([]);
+        }
+      } catch(_stageErr) {}
       const items = Array.isArray(req.body) ? req.body : (Array.isArray(req.body && req.body.itens) ? req.body.itens : []);
       const apps = (items||[]).map(a => ({ app_name: a.app_name, version: a.version }));
       const missings = await this.appsSvc.validateInstallSet(target, apps);
@@ -7828,6 +7887,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try{
       var envSel = document.getElementById('envSelectHeader');
       if(!envSel || !envSel.value) return;
+      try{
+        var __stage = (typeof __getSelectedEnvStage === 'function') ? __getSelectedEnvStage() : null;
+        if (typeof __isProdStage === 'function' && __isProdStage(__stage)) return;
+      }catch(_){}
       var envId = envSel.value;
       var rows = document.querySelectorAll('#overviewTable tbody tr');
       for (var i=0;i<rows.length;i++){
