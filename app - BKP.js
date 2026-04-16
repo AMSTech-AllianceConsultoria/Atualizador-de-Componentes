@@ -90,12 +90,6 @@ function ensureCliArgQuoted(val) {
   return `"${esc}"`;
 }
 
-function ensureCliPasswordSingleQuoted(val) {
-  if (val == null) return "''";
-  const s = String(val);
-  return `'${s.replace(/'/g, `'\''`)}'`;
-}
-
 // === MTA deploy tweaks for large MTAR uploads (CF MultiApps plugin) ===
 // If MTAR is large, we can reduce upload chunk size to avoid gorouter timeouts and
 // optionally increase the upload/deploy timeouts.
@@ -3246,9 +3240,6 @@ try{
 }
     var d = await r.json();
     var sel = $('#objSelect');
-    if(!sel){
-      return;
-    }
     sel.innerHTML='';
     // placeholder removido por solicitação do usuário
 (Array.isArray(d?.items)?d.items:[]).forEach(function(it){
@@ -3379,88 +3370,37 @@ on('btnUpdate', 'click', async function(){
 
 if(document.getElementById('objSelect')){ on('objSelect', 'change', showVersions); }
 
-try{
-  var __envSelInit = document.getElementById('envSelectHeader');
-  if (__envSelInit && __envSelInit.dataset && !('prevValue' in __envSelInit.dataset)) {
-    __envSelInit.dataset.prevValue = __envSelInit.value || '';
-  }
-}catch(_){ }
-
-on('envSelectHeader', 'change', async function(){
-  var envSel = document.getElementById('envSelectHeader');
-  var previousValue = null;
-  try{
-    previousValue = this && this.dataset ? (this.dataset.prevValue || '') : '';
-  }catch(_){ previousValue = ''; }
-
+on('envSelectHeader', 'change', function(){
   try {
+    // Sempre exigir senha ao trocar de ambiente
     if (typeof ENV_PASS !== 'undefined') { try { ENV_PASS = null; } catch(_){} }
     if (typeof window !== 'undefined' && 'ENV_PASS' in window) { try { delete window.ENV_PASS; } catch(_){} }
+    // Opcional: limpar qualquer cache de senha em atributos de dados (se houver)
     try { document.body && document.body.removeAttribute && document.body.removeAttribute('data-env-pass'); } catch(_){}
   } catch(_) {}
 
   try {
-    __updateOverviewHeadersForStage(__getSelectedEnvStage());
-    __toggleProdOnlyButtons(__getSelectedEnvStage());
-    try { __normalizeOverviewColumnLayout(); } catch(_) {}
+    // Sempre exigir senha ao trocar de ambiente
+    if (typeof ENV_PASS !== 'undefined') { try { ENV_PASS = null; } catch(_){} }
+    if (typeof window !== 'undefined' && 'ENV_PASS' in window) { try { delete window.ENV_PASS; } catch(_){} }
+    // Opcional: limpar qualquer cache de senha em atributos de dados (se houver)
+    try { document.body && document.body.removeAttribute && document.body.removeAttribute('data-env-pass'); } catch(_){}
   } catch(_) {}
 
-  if(!envSel || !envSel.value){
-    try{
-      var tbody0 = document.querySelector('#overviewTable tbody');
-      if (tbody0) tbody0.innerHTML = '<tr><td colspan="4">Selecione uma empresa/ambiente.</td></tr>';
-    }catch(_){}
-    return;
+  try { __updateOverviewHeadersForStage(__getSelectedEnvStage()); __toggleProdOnlyButtons(__getSelectedEnvStage());
+  try { __normalizeOverviewColumnLayout(); } catch(_) {} } catch(_) {}
+
+  // Atualiza lista de objetos (se houver função)
+  if (typeof refreshAppsList === 'function') { try { refreshAppsList(); } catch(_){} }
+  // Se já houver objeto selecionado, atualiza suas versões
+  if ((function(){var _s=document.getElementById('objSelect'); return _s && _s.value;})()){
+    try { showVersions(); } catch(_) {}
   }
-
-  var pass = null;
-  try{
-    pass = await customPasswordPrompt('Digite a senha do usuário do ambiente selecionado:');
-  }catch(err){
-    console.error('[envSelectHeader] erro ao solicitar senha do ambiente:', err);
-    pass = null;
-  }
-
-  if (pass === null || pass === '') {
-    try{
-      if (envSel) envSel.value = previousValue || '';
-      if (this && this.dataset) this.dataset.prevValue = envSel ? (envSel.value || '') : '';
-    }catch(_){}
-    try{
-      var tbody1 = document.querySelector('#overviewTable tbody');
-      if (tbody1) tbody1.innerHTML = '<tr><td colspan="4">Troca de ambiente cancelada. Informe a senha para carregar o overview.</td></tr>';
-    }catch(_){}
-    return;
-  }
-
-  try{
-    ENV_PASS = pass;
-    if (typeof window !== 'undefined') window.ENV_PASS = pass;
-  }catch(_){}
-
-  try{
-    if (typeof refreshAppsList === 'function') await refreshAppsList();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao atualizar lista de apps:', err);
-  }
-
-  try{
-    var _s = document.getElementById('objSelect');
-    if (_s && _s.value) showVersions();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao atualizar versões:', err);
-  }
-
-  try{
-    if (this && this.dataset) this.dataset.prevValue = envSel.value || '';
-  }catch(_){}
-
-  try{
-    var btn = document.getElementById('btnOverview');
-    if (btn) await btn.click();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao disparar overview:', err);
-  }
+  // Garantir que a senha seja solicitada ao disparar novo overview
+  try { if (typeof ENV_PASS !== 'undefined') { ENV_PASS = null; } } catch(_){}
+  // Dispara o overview automático (sem await)
+  var btn = document.getElementById('btnOverview');
+  if (btn) btn.click();
 });
 on('btnLogout', 'click', async function(){
   try{ await fetch('/api/logout', {method:'POST'});}catch(_){}
@@ -3526,6 +3466,7 @@ function applyOverviewFilters(){
   }catch(_){}
 }
 
+on('btnOverview', 'click', async function(){
 on('ovFilter','change', function(){
   applyOverviewFilters();
 });
@@ -3547,7 +3488,6 @@ on('ovSearch','keydown', function(e){
   }
 });
 
-on('btnOverview', 'click', async function(){
   try{
     const envSel = document.getElementById('envSelectHeader');
     if(!envSel || !envSel.value){ customAlert('Selecione uma empresa/ambiente.'); return; }
@@ -3567,22 +3507,12 @@ on('btnOverview', 'click', async function(){
     if(wrap) wrap.style.display = 'block';
     if(tbody) tbody.innerHTML = '<tr><td colspan="4">Carregando overview do ambiente...</td></tr>';
 
-    console.log('[overview] iniciando carga', { envId: envId });
     const r = await fetch('/api/overview', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'X-Edit-Id': String((typeof document!=='undefined' && document.getElementById('env_id') && document.getElementById('env_id').value) ? document.getElementById('env_id').value : ((typeof window!=='undefined' && window.currentEditId) ? window.currentEditId : ''))},
       body: JSON.stringify({ envId: envId, password: pass })
     });
-    let j = null;
-    try{
-      j = await r.json();
-    }catch(parseErr){
-      let raw = '';
-      try{ raw = await r.text(); }catch(_){}
-      console.error('[overview] resposta inválida da API /api/overview', parseErr, raw);
-      j = { ok:false, error: raw || (parseErr && parseErr.message) || 'Resposta inválida da API /api/overview' };
-    }
-    console.log('[overview] resposta recebida', j);
+    const j = await r.json();
 
     if(!tbody){ return; }
     tbody.innerHTML = '';
@@ -3593,17 +3523,6 @@ on('btnOverview', 'click', async function(){
       td.innerHTML = '<div class="pre">' + (j && j.error ? j.error : 'Falha ao carregar overview') + '</div>';
       tr.appendChild(td);
       tbody.appendChild(tr);
-      return;
-    }
-
-    if (!Array.isArray(j.items) || j.items.length === 0){
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = 4;
-      td.innerHTML = '<div class="muted" style="padding:12px">Nenhum componente encontrado para este ambiente. Atualize o catálogo/repositório ou valide se já existem versões instaladas gravadas para a empresa e ambiente selecionados.</div>';
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-      try{ applyOverviewFilters(); }catch(_){ }
       return;
     }
 
@@ -6190,7 +6109,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
       // Build login args for the chosen CLI
 
-  const loginArgs = ['login','-a', apiUrl, '--skip-ssl-validation','-u', env.username,'-p', ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login','-a', apiUrl, '--skip-ssl-validation','-u', env.username,'-p', String(password)];
       if (CLI_NAME === 'cf' && env.origin) loginArgs.push('--origin', String(env.origin));
       if (env.org)   loginArgs.push('-o', ensureCliArgQuoted(env.org));
       if (env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
@@ -6220,7 +6139,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
           } catch(_){}
         };
         const rApi   = await runCmd(CLI_BIN, ['api', apiUrl, '--skip-ssl-validation']); pushDetail('cf api', rApi);
-        const authArgs = ['auth', env.username, ensureCliPasswordSingleQuoted(password)];
+        const authArgs = ['auth', env.username, String(password)];
         if (env.origin) authArgs.push('--origin', String(env.origin));
         const rAuth  = await runCmd(CLI_BIN, authArgs); pushDetail('cf auth', rAuth);
         const tgtArgs = ['target'];
@@ -6245,87 +6164,15 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
       const mtasLines = (sMtas.stdout || '').split(/\r?\n/);
 // Obter lista de objetos conhecidos
-      let ids = await this.appsSvc.listAppIds();
-      const envName = String((env && env.name) || '').trim();
-      const envSpace = String((env && env.space) || '').trim();
-      const envOrg = String((env && env.org) || '').trim();
-      let empresaKey = envName || envOrg;
-      let ambienteKey = envSpace;
-      if (!ambienteKey && empresaKey) {
-        const mStage = empresaKey.match(/\s+(DEV|QAS|PRD|HML|PROD|PRODUCAO|HOMOLOG|QA|TEST|STG)$/i);
-        if (mStage) ambienteKey = String(mStage[1] || '').toUpperCase();
-      }
-      const sourceCandidates = Array.from(new Set([
-        envName,
-        String((env && env.id) || ''),
-        envOrg,
-        empresaKey
-      ].filter(Boolean)));
-      const installedBest = {};
-      try {
-        let installedRows = [];
-        for (const srcKey of sourceCandidates) {
-          const bySource = await this.appsSvc.db.all(
-            `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE source = ?`,
-            [srcKey]
-          );
-          if (Array.isArray(bySource) && bySource.length) installedRows = installedRows.concat(bySource);
-        }
-        if (empresaKey || ambienteKey) {
-          const filters = [];
-          const params = [];
-          if (empresaKey) { filters.push(`LOWER(COALESCE(empresa,'')) = LOWER(?)`); params.push(empresaKey); }
-          if (ambienteKey) { filters.push(`LOWER(COALESCE(ambiente,'')) = LOWER(?)`); params.push(ambienteKey); }
-          if (filters.length) {
-            const byEmpresaAmb = await this.appsSvc.db.all(
-              `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE ${filters.join(' AND ')}`,
-              params
-            );
-            if (Array.isArray(byEmpresaAmb) && byEmpresaAmb.length) installedRows = installedRows.concat(byEmpresaAmb);
-          }
-        }
-        if ((!installedRows || !installedRows.length) && envName) {
-          const likeRows = await this.appsSvc.db.all(
-            `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE source LIKE ? OR empresa LIKE ?`,
-            [envName + '%', envName + '%']
-          );
-          if (Array.isArray(likeRows) && likeRows.length) installedRows = installedRows.concat(likeRows);
-        }
-        const seenInstalled = new Set();
-        const vkey = (v) => String(v || '0').split('.').map(x => String(x).padStart(3,'0')).join('');
-        for (const row of (installedRows || [])) {
-          if (!row || !row.component) continue;
-          const comp = String(row.component || '').trim().toLowerCase();
-          const ver = String(row.version || '').trim().replace(/^v/i, '');
-          if (!comp || !ver) continue;
-          seenInstalled.add(comp);
-          const cur = String(installedBest[comp] || '');
-          if (!cur || vkey(ver) >= vkey(cur)) installedBest[comp] = ver;
-        }
-        if ((!ids || !ids.length) && seenInstalled.size) {
-          ids = Array.from(seenInstalled).sort((a,b)=>a.localeCompare(b, undefined, { numeric:true }));
-        }
-      } catch(_installedErr) {
-        try{ console.error('[overview] installed fallback error', _installedErr && _installedErr.message || _installedErr); }catch(_){ }
-      }
+      const ids = await this.appsSvc.listAppIds();
       // Mapear versões do ambiente (via CLI 'mtas')
       const envMap = {};
       for (const id of ids){
         const v = extractClientVersionFromLines(mtasLines, id);
         if (v) envMap[id] = v;
       }
-      try {
-        for (const comp of Object.keys(installedBest)) {
-          if (!envMap[comp] && installedBest[comp]) envMap[comp] = installedBest[comp];
-        }
-      } catch(_){ }
       // Mapa do repositório (base Thomson / available_apps)
       const repoMapDefault = await this.appsSvc.latestRepoVersionMap();
-      try {
-        if ((!ids || !ids.length) && repoMapDefault && Object.keys(repoMapDefault).length) {
-          ids = Object.keys(repoMapDefault).sort((a,b)=>a.localeCompare(b, undefined, { numeric:true }));
-        }
-      } catch(_){ }
 
       // === NOVO FLUXO PARA PRODUÇÃO (PRD) ===
       // Se o ambiente selecionado for PRD, comparar HML(installed) x PRD(ambiente)
@@ -6456,7 +6303,7 @@ const items = ids.map(id => {
         // Fluxo padrão (HML): ambiente atual vs repo Thomson
         return {
           id,
-          prev_version: envMap[id] || installedBest[String(id).toLowerCase()] || null,
+          prev_version: envMap[id] || null,
           repo_version: repoMapDefault[id] || null
         };
       });
@@ -6470,7 +6317,7 @@ const items = ids.map(id => {
         }
       }catch(_e){ try{ console.error('[installed_apps] overview sync error', _e && _e.message || _e); }catch(_){} }
 
-      res.json({ ok:true, items, debug: { total_ids: Array.isArray(ids) ? ids.length : 0, env_versions: Object.keys(envMap || {}).length, installed_versions: Object.keys(installedBest || {}).length, repo_versions: Object.keys(repoMapDefault || {}).length, empresa: empresaKey || null, ambiente: ambienteKey || null } });
+      res.json({ ok:true, items });
     }catch(e){
       res.status(500).json({ ok:false, error: e.message || String(e) });
     }
@@ -6497,7 +6344,7 @@ const items = ids.map(id => {
         : ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf'));
 CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
-  const loginArgs = ['login', '-a', env.org_url, '--skip-ssl-validation', '-u', env.username, '-p', ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login', '-a', env.org_url, '--skip-ssl-validation', '-u', env.username, '-p', String(password)];
       if (env.org)   { loginArgs.push('-o', ensureCliArgQuoted(env.org)); }
       if (env.space) { loginArgs.push('-s', ensureCliArgQuoted(env.space)); }
 
@@ -6763,7 +6610,7 @@ async deployStream(req,res){
     }
 
     // 3) Login
-    const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
+    const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',String(password)];
     const _quoteIfNeeded = (v) => {
       return ensureCliArgQuoted(v);
     };
@@ -7420,7 +7267,7 @@ async rollbackLive(req,res){
           : ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf'));
       }
 
-  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',String(password)];
       if(env.org) loginArgs.push('-o', ensureCliArgQuoted(env.org));
       if(env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
       write('> xs ' + loginArgs.join(' '));
@@ -7539,7 +7386,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
       }
 
       const _quoteIfNeeded = (v) => ensureCliArgQuoted(v);
-      const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
+      const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',String(password)];
       if (env.org)   loginArgs.push('-o', _quoteIfNeeded(env.org));
       if (env.space) loginArgs.push('-s', _quoteIfNeeded(env.space));
 
@@ -7708,7 +7555,7 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'apps.db');
 
       send('> ' + CLI_NAME + ' login ...');
 
-  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',String(password)];
       if(env.org) loginArgs.push('-o', ensureCliArgQuoted(env.org));
       if(env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
       /**
@@ -7828,7 +7675,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
   }
 async renderHome(req,res){
     try{
-      const envs = await this.envSvc.listAll();
+      const envs = await this.envSvc.list();
       res.type('html').send(HomeView.html(envs));
     }catch(e){
       console.error('renderHome env list error:', e);
