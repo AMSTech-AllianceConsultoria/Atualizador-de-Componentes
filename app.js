@@ -90,10 +90,23 @@ function ensureCliArgQuoted(val) {
   return `"${esc}"`;
 }
 
-function ensureCliPasswordSingleQuoted(val) {
-  if (val == null) return "''";
+// Password handling
+// Cenário validado neste projeto:
+// - consultas/leitura de ambiente funcionam melhor quando a senha vai entre aspas simples
+// - deploy/rollback/autenticação operacional devem enviar a senha sem aspas literais
+function ensureCliPasswordQuotedForLookup(val) {
+  if (val == null) return '';
   const s = String(val);
-  return `'${s.replace(/'/g, `'\''`)}'`;
+  if (!/[^A-Za-z0-9]/.test(s)) return s;
+  return `'${s.replace(/'/g, "\\'")}'`;
+}
+function ensureCliPasswordRawForDeploy(val) {
+  if (val == null) return '';
+  return String(val);
+}
+function ensureCliSpawnRaw(val) {
+  if (val == null) return '';
+  return String(val);
 }
 
 // === MTA deploy tweaks for large MTAR uploads (CF MultiApps plugin) ===
@@ -731,6 +744,53 @@ function nowSqlite(){ return toLocalSql(new Date()); }
  */
 function ensureDirSync(p){ if(!fs.existsSync(p)) fs.mkdirSync(p, {recursive:true}); }
 
+function resolveSpawnCommand(cmd){
+  const value = String(cmd || '').trim();
+  if (!value) return value;
+  if (process.platform !== 'win32') return value;
+  if (value.toLowerCase() === 'node') return process.execPath || value;
+  return value;
+}
+
+function quoteWindowsArg(value){
+  const s = String(value ?? '');
+  if (s.length === 0) return '""';
+  if (!/[\s"]/g.test(s)) return s;
+  return '"' + s.replace(/(\*)"/g, '$1$1\"').replace(/(\+)$/g, '$1$1') + '"';
+}
+
+function shouldUseCmdShim(cmd){
+  if (process.platform !== 'win32') return false;
+  const value = String(cmd || '').trim();
+  if (!value) return false;
+  if (value.toLowerCase() === 'node') return false;
+  if (/\.exe$/i.test(value)) return false;
+  return true;
+}
+
+function spawnSafe(cmd, args = [], opts = {}){
+  const cp = require('child_process');
+  const baseCmd = resolveSpawnCommand(cmd);
+  const finalArgs = Array.isArray(args) ? args.map(a => String(a)) : [];
+  const finalOpts = { ...opts };
+  delete finalOpts.shell;
+
+  if (shouldUseCmdShim(baseCmd)) {
+    const commandLine = [quoteWindowsArg(baseCmd), ...finalArgs.map(quoteWindowsArg)].join(' ');
+    return cp.spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', commandLine], {
+      windowsVerbatimArguments: true,
+      shell: false,
+      ...finalOpts,
+    });
+  }
+
+  return cp.spawn(baseCmd, finalArgs, {
+    shell: false,
+    ...finalOpts,
+  });
+}
+
+
 /**
  * Função runCmd
  * - O que faz: Encapsula uma operação específica do domínio.
@@ -768,9 +828,8 @@ function runCmd(cmd, args = [], opts = {}) {
   const extra = splitArgs(process.env.XS_ARGS || '');
 
   return new Promise((resolve) => {
-    // Use shell:true so Windows can resolve .cmd/.exe and PATH entries
-    const child = require('child_process').spawn(cmd, [...extra, ...args], {
-      shell: true,
+    const spawnCmd = resolveSpawnCommand(cmd);
+    const child = spawnSafe(spawnCmd, [...extra, ...args], {
       ...opts });
     let out = '', err = '';
     child.stdout.on('data', d => out += d.toString());
@@ -963,9 +1022,10 @@ try { await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component`); 
     )`)
 try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN empresa TEXT`); } catch(_){}
 try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN ambiente TEXT`); } catch(_){}
+try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN org_url TEXT`); } catch(_){}
 ;
-    await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component; CREATE INDEX IF NOT EXISTS idx_installed_source_component_env ON installed_apps(source, component, empresa, ambiente)`);
-await this.db.run(`DROP INDEX IF EXISTS ux_installed_source_component; CREATE UNIQUE INDEX IF NOT EXISTS ux_installed_source_component_env ON installed_apps(source, component, empresa, ambiente)`);
+    await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component; CREATE INDEX IF NOT EXISTS idx_installed_source_component_env ON installed_apps(source, component, empresa, ambiente, org_url)`);
+await this.db.run(`DROP INDEX IF EXISTS ux_installed_source_component; CREATE UNIQUE INDEX IF NOT EXISTS ux_installed_source_component_env ON installed_apps(source, component, empresa, ambiente, org_url)`);
 
 
     await this.db.run(`
@@ -1113,6 +1173,7 @@ class AppsService {
       // Derivar empresa e ambiente
       let empresa = (env && (env.name || env.company_name || env.org)) ? String(env.name || env.company_name || env.org).trim() : '';
       let ambiente = (env && (env.space || env.environment || env.env || env.ambiente)) ? String(env.space || env.environment || env.env || env.ambiente).trim() : '';
+      const orgUrl = (env && (env.org_url || env.url)) ? String(env.org_url || env.url).trim() : '';
       if(!ambiente && empresa){
         const _m = empresa.match(/\s+(DEV|QAS|PRD|HML|PROD|PRODUCAO|HOMOLOG|PPRD|QA|TEST|STG)$/i);
         if(_m){
@@ -1124,15 +1185,15 @@ if(!comp || !ver || !src) return;
 
       // Checagem: ler a versão atual para este source/componente
       const row = await this.db.get(
-        `SELECT version FROM installed_apps WHERE source=? AND component=? AND empresa=? AND ambiente=?`,
-        [src, comp, empresa || null, ambiente || null]
+        `SELECT version FROM installed_apps WHERE source=? AND component=? AND empresa=? AND ambiente=? AND ifnull(org_url,'') = ifnull(?, '')`,
+        [src, comp, empresa || null, ambiente || null, orgUrl || null]
       );
 
       if (!row){
         // Inserir apenas se não existir
         await this.db.run(
-          `INSERT INTO installed_apps(component,version,source,empresa,ambiente) VALUES (?,?,?,?,?)`,
-          [comp, ver, src, empresa || null, ambiente || null]
+          `INSERT INTO installed_apps(component,version,source,empresa,ambiente,org_url) VALUES (?,?,?,?,?,?)`,
+          [comp, ver, src, empresa || null, ambiente || null, orgUrl || null]
         );
         try{ console.log('[installed_apps] insert', {source:src, component:comp, version:ver}); }catch(_){}
         return;
@@ -1147,8 +1208,8 @@ if(!comp || !ver || !src) return;
 
       // Houve mudança: atualizar
       await this.db.run(
-        `UPDATE installed_apps SET version=?, installed_at=datetime('now','localtime') WHERE source=? AND component=? AND empresa=? AND ambiente=?`,
-        [ver, src, comp, empresa || null, ambiente || null]
+        `UPDATE installed_apps SET version=?, installed_at=datetime('now','localtime'), org_url=? WHERE source=? AND component=? AND empresa=? AND ambiente=? AND ifnull(org_url,'') = ifnull(?, '')`,
+        [ver, orgUrl || null, src, comp, empresa || null, ambiente || null, orgUrl || null]
       );
       try{ console.log('[installed_apps] update', {source:src, component:comp, from:cur, to:ver}); }catch(_){}
     }catch(_e){ /* noop */ }
@@ -1469,7 +1530,7 @@ if(!comp || !ver || !src) return;
 
     // Busca ambiente por id ou nome
     const envRow = await this.db.get(
-      'select e.id as id, e.' + envNameCol + ' as name from ' + envTable + ' e where e.id = ? or e.' + envNameCol + ' = ?',
+      'select e.id as id, e.' + envNameCol + ' as name, e.org_url as org_url from ' + envTable + ' e where e.id = ? or e.' + envNameCol + ' = ?',
       [envId, envId]
     );
 
@@ -1499,7 +1560,16 @@ if(!comp || !ver || !src) return;
     };
     const installedByName = await fetchInstalled(envRow && envRow.name);
     const installedById   = await fetchInstalled(envRow && envRow.id);
-    const installedAll = [].concat(installedByName||[], installedById||[]);
+    let installedByUrl = [];
+    if (hasInstalled && envRow && envRow.org_url) {
+      try {
+        installedByUrl = await this.db.all(
+          'select component, version from installed_apps where ifnull(org_url,\'\') = ifnull(?, \'\')',
+          [envRow.org_url]
+        );
+      } catch(_e) { installedByUrl = []; }
+    }
+    const installedAll = [].concat(installedByName||[], installedById||[], installedByUrl||[]);
 // Consolidar maior versão por componente via _vkey
     const best = new Map();
     for (const r of (installedAll||[])){
@@ -3246,9 +3316,6 @@ try{
 }
     var d = await r.json();
     var sel = $('#objSelect');
-    if(!sel){
-      return;
-    }
     sel.innerHTML='';
     // placeholder removido por solicitação do usuário
 (Array.isArray(d?.items)?d.items:[]).forEach(function(it){
@@ -3379,88 +3446,37 @@ on('btnUpdate', 'click', async function(){
 
 if(document.getElementById('objSelect')){ on('objSelect', 'change', showVersions); }
 
-try{
-  var __envSelInit = document.getElementById('envSelectHeader');
-  if (__envSelInit && __envSelInit.dataset && !('prevValue' in __envSelInit.dataset)) {
-    __envSelInit.dataset.prevValue = __envSelInit.value || '';
-  }
-}catch(_){ }
-
-on('envSelectHeader', 'change', async function(){
-  var envSel = document.getElementById('envSelectHeader');
-  var previousValue = null;
-  try{
-    previousValue = this && this.dataset ? (this.dataset.prevValue || '') : '';
-  }catch(_){ previousValue = ''; }
-
+on('envSelectHeader', 'change', function(){
   try {
+    // Sempre exigir senha ao trocar de ambiente
     if (typeof ENV_PASS !== 'undefined') { try { ENV_PASS = null; } catch(_){} }
     if (typeof window !== 'undefined' && 'ENV_PASS' in window) { try { delete window.ENV_PASS; } catch(_){} }
+    // Opcional: limpar qualquer cache de senha em atributos de dados (se houver)
     try { document.body && document.body.removeAttribute && document.body.removeAttribute('data-env-pass'); } catch(_){}
   } catch(_) {}
 
   try {
-    __updateOverviewHeadersForStage(__getSelectedEnvStage());
-    __toggleProdOnlyButtons(__getSelectedEnvStage());
-    try { __normalizeOverviewColumnLayout(); } catch(_) {}
+    // Sempre exigir senha ao trocar de ambiente
+    if (typeof ENV_PASS !== 'undefined') { try { ENV_PASS = null; } catch(_){} }
+    if (typeof window !== 'undefined' && 'ENV_PASS' in window) { try { delete window.ENV_PASS; } catch(_){} }
+    // Opcional: limpar qualquer cache de senha em atributos de dados (se houver)
+    try { document.body && document.body.removeAttribute && document.body.removeAttribute('data-env-pass'); } catch(_){}
   } catch(_) {}
 
-  if(!envSel || !envSel.value){
-    try{
-      var tbody0 = document.querySelector('#overviewTable tbody');
-      if (tbody0) tbody0.innerHTML = '<tr><td colspan="4">Selecione uma empresa/ambiente.</td></tr>';
-    }catch(_){}
-    return;
+  try { __updateOverviewHeadersForStage(__getSelectedEnvStage()); __toggleProdOnlyButtons(__getSelectedEnvStage());
+  try { __normalizeOverviewColumnLayout(); } catch(_) {} } catch(_) {}
+
+  // Atualiza lista de objetos (se houver função)
+  if (typeof refreshAppsList === 'function') { try { refreshAppsList(); } catch(_){} }
+  // Se já houver objeto selecionado, atualiza suas versões
+  if ((function(){var _s=document.getElementById('objSelect'); return _s && _s.value;})()){
+    try { showVersions(); } catch(_) {}
   }
-
-  var pass = null;
-  try{
-    pass = await customPasswordPrompt('Digite a senha do usuário do ambiente selecionado:');
-  }catch(err){
-    console.error('[envSelectHeader] erro ao solicitar senha do ambiente:', err);
-    pass = null;
-  }
-
-  if (pass === null || pass === '') {
-    try{
-      if (envSel) envSel.value = previousValue || '';
-      if (this && this.dataset) this.dataset.prevValue = envSel ? (envSel.value || '') : '';
-    }catch(_){}
-    try{
-      var tbody1 = document.querySelector('#overviewTable tbody');
-      if (tbody1) tbody1.innerHTML = '<tr><td colspan="4">Troca de ambiente cancelada. Informe a senha para carregar o overview.</td></tr>';
-    }catch(_){}
-    return;
-  }
-
-  try{
-    ENV_PASS = pass;
-    if (typeof window !== 'undefined') window.ENV_PASS = pass;
-  }catch(_){}
-
-  try{
-    if (typeof refreshAppsList === 'function') await refreshAppsList();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao atualizar lista de apps:', err);
-  }
-
-  try{
-    var _s = document.getElementById('objSelect');
-    if (_s && _s.value) showVersions();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao atualizar versões:', err);
-  }
-
-  try{
-    if (this && this.dataset) this.dataset.prevValue = envSel.value || '';
-  }catch(_){}
-
-  try{
-    var btn = document.getElementById('btnOverview');
-    if (btn) await btn.click();
-  }catch(err){
-    console.error('[envSelectHeader] erro ao disparar overview:', err);
-  }
+  // Garantir que a senha seja solicitada ao disparar novo overview
+  try { if (typeof ENV_PASS !== 'undefined') { ENV_PASS = null; } } catch(_){}
+  // Dispara o overview automático (sem await)
+  var btn = document.getElementById('btnOverview');
+  if (btn) btn.click();
 });
 on('btnLogout', 'click', async function(){
   try{ await fetch('/api/logout', {method:'POST'});}catch(_){}
@@ -3526,6 +3542,7 @@ function applyOverviewFilters(){
   }catch(_){}
 }
 
+on('btnOverview', 'click', async function(){
 on('ovFilter','change', function(){
   applyOverviewFilters();
 });
@@ -3547,7 +3564,6 @@ on('ovSearch','keydown', function(e){
   }
 });
 
-on('btnOverview', 'click', async function(){
   try{
     const envSel = document.getElementById('envSelectHeader');
     if(!envSel || !envSel.value){ customAlert('Selecione uma empresa/ambiente.'); return; }
@@ -3567,22 +3583,12 @@ on('btnOverview', 'click', async function(){
     if(wrap) wrap.style.display = 'block';
     if(tbody) tbody.innerHTML = '<tr><td colspan="4">Carregando overview do ambiente...</td></tr>';
 
-    console.log('[overview] iniciando carga', { envId: envId });
     const r = await fetch('/api/overview', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'X-Edit-Id': String((typeof document!=='undefined' && document.getElementById('env_id') && document.getElementById('env_id').value) ? document.getElementById('env_id').value : ((typeof window!=='undefined' && window.currentEditId) ? window.currentEditId : ''))},
       body: JSON.stringify({ envId: envId, password: pass })
     });
-    let j = null;
-    try{
-      j = await r.json();
-    }catch(parseErr){
-      let raw = '';
-      try{ raw = await r.text(); }catch(_){}
-      console.error('[overview] resposta inválida da API /api/overview', parseErr, raw);
-      j = { ok:false, error: raw || (parseErr && parseErr.message) || 'Resposta inválida da API /api/overview' };
-    }
-    console.log('[overview] resposta recebida', j);
+    const j = await r.json();
 
     if(!tbody){ return; }
     tbody.innerHTML = '';
@@ -3593,17 +3599,6 @@ on('btnOverview', 'click', async function(){
       td.innerHTML = '<div class="pre">' + (j && j.error ? j.error : 'Falha ao carregar overview') + '</div>';
       tr.appendChild(td);
       tbody.appendChild(tr);
-      return;
-    }
-
-    if (!Array.isArray(j.items) || j.items.length === 0){
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = 4;
-      td.innerHTML = '<div class="muted" style="padding:12px">Nenhum componente encontrado para este ambiente. Atualize o catálogo/repositório ou valide se já existem versões instaladas gravadas para a empresa e ambiente selecionados.</div>';
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-      try{ applyOverviewFilters(); }catch(_){ }
       return;
     }
 
@@ -6190,7 +6185,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
       // Build login args for the chosen CLI
 
-  const loginArgs = ['login','-a', apiUrl, '--skip-ssl-validation','-u', env.username,'-p', ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login','-a', apiUrl, '--skip-ssl-validation','-u', env.username,'-p', ensureCliPasswordQuotedForLookup(password)];
       if (CLI_NAME === 'cf' && env.origin) loginArgs.push('--origin', String(env.origin));
       if (env.org)   loginArgs.push('-o', ensureCliArgQuoted(env.org));
       if (env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
@@ -6220,7 +6215,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
           } catch(_){}
         };
         const rApi   = await runCmd(CLI_BIN, ['api', apiUrl, '--skip-ssl-validation']); pushDetail('cf api', rApi);
-        const authArgs = ['auth', env.username, ensureCliPasswordSingleQuoted(password)];
+        const authArgs = ['auth', env.username, String(password)];
         if (env.origin) authArgs.push('--origin', String(env.origin));
         const rAuth  = await runCmd(CLI_BIN, authArgs); pushDetail('cf auth', rAuth);
         const tgtArgs = ['target'];
@@ -6245,87 +6240,15 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
       const mtasLines = (sMtas.stdout || '').split(/\r?\n/);
 // Obter lista de objetos conhecidos
-      let ids = await this.appsSvc.listAppIds();
-      const envName = String((env && env.name) || '').trim();
-      const envSpace = String((env && env.space) || '').trim();
-      const envOrg = String((env && env.org) || '').trim();
-      let empresaKey = envName || envOrg;
-      let ambienteKey = envSpace;
-      if (!ambienteKey && empresaKey) {
-        const mStage = empresaKey.match(/\s+(DEV|QAS|PRD|HML|PROD|PRODUCAO|HOMOLOG|QA|TEST|STG)$/i);
-        if (mStage) ambienteKey = String(mStage[1] || '').toUpperCase();
-      }
-      const sourceCandidates = Array.from(new Set([
-        envName,
-        String((env && env.id) || ''),
-        envOrg,
-        empresaKey
-      ].filter(Boolean)));
-      const installedBest = {};
-      try {
-        let installedRows = [];
-        for (const srcKey of sourceCandidates) {
-          const bySource = await this.appsSvc.db.all(
-            `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE source = ?`,
-            [srcKey]
-          );
-          if (Array.isArray(bySource) && bySource.length) installedRows = installedRows.concat(bySource);
-        }
-        if (empresaKey || ambienteKey) {
-          const filters = [];
-          const params = [];
-          if (empresaKey) { filters.push(`LOWER(COALESCE(empresa,'')) = LOWER(?)`); params.push(empresaKey); }
-          if (ambienteKey) { filters.push(`LOWER(COALESCE(ambiente,'')) = LOWER(?)`); params.push(ambienteKey); }
-          if (filters.length) {
-            const byEmpresaAmb = await this.appsSvc.db.all(
-              `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE ${filters.join(' AND ')}`,
-              params
-            );
-            if (Array.isArray(byEmpresaAmb) && byEmpresaAmb.length) installedRows = installedRows.concat(byEmpresaAmb);
-          }
-        }
-        if ((!installedRows || !installedRows.length) && envName) {
-          const likeRows = await this.appsSvc.db.all(
-            `SELECT component, version, source, empresa, ambiente, installed_at FROM installed_apps WHERE source LIKE ? OR empresa LIKE ?`,
-            [envName + '%', envName + '%']
-          );
-          if (Array.isArray(likeRows) && likeRows.length) installedRows = installedRows.concat(likeRows);
-        }
-        const seenInstalled = new Set();
-        const vkey = (v) => String(v || '0').split('.').map(x => String(x).padStart(3,'0')).join('');
-        for (const row of (installedRows || [])) {
-          if (!row || !row.component) continue;
-          const comp = String(row.component || '').trim().toLowerCase();
-          const ver = String(row.version || '').trim().replace(/^v/i, '');
-          if (!comp || !ver) continue;
-          seenInstalled.add(comp);
-          const cur = String(installedBest[comp] || '');
-          if (!cur || vkey(ver) >= vkey(cur)) installedBest[comp] = ver;
-        }
-        if ((!ids || !ids.length) && seenInstalled.size) {
-          ids = Array.from(seenInstalled).sort((a,b)=>a.localeCompare(b, undefined, { numeric:true }));
-        }
-      } catch(_installedErr) {
-        try{ console.error('[overview] installed fallback error', _installedErr && _installedErr.message || _installedErr); }catch(_){ }
-      }
+      const ids = await this.appsSvc.listAppIds();
       // Mapear versões do ambiente (via CLI 'mtas')
       const envMap = {};
       for (const id of ids){
         const v = extractClientVersionFromLines(mtasLines, id);
         if (v) envMap[id] = v;
       }
-      try {
-        for (const comp of Object.keys(installedBest)) {
-          if (!envMap[comp] && installedBest[comp]) envMap[comp] = installedBest[comp];
-        }
-      } catch(_){ }
       // Mapa do repositório (base Thomson / available_apps)
       const repoMapDefault = await this.appsSvc.latestRepoVersionMap();
-      try {
-        if ((!ids || !ids.length) && repoMapDefault && Object.keys(repoMapDefault).length) {
-          ids = Object.keys(repoMapDefault).sort((a,b)=>a.localeCompare(b, undefined, { numeric:true }));
-        }
-      } catch(_){ }
 
       // === NOVO FLUXO PARA PRODUÇÃO (PRD) ===
       // Se o ambiente selecionado for PRD, comparar HML(installed) x PRD(ambiente)
@@ -6370,23 +6293,42 @@ if (usePrdVsHml) {
     const stageList = ['HML','QAS','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
     let hmlEnv = null;
 
-    // 1) Tentativa por nome exato e stage
-    for (const nm of candNames) {
+    // 1) PRIORIDADE: mesma org + mesma space + stage de QAS/HML + URL diferente
+    if (env && (env.org || env.space)) {
       const row = await this.envSvc.db.get(
-        `SELECT id, name, stage FROM environments
-         WHERE name = ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
-         LIMIT 1`, [nm, ...stageList]
+        `SELECT id, name, stage, org_url FROM environments
+         WHERE UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+           AND ifnull(org,'') = ifnull(?, '')
+           AND ifnull(space,'') = ifnull(?, '')
+           AND ifnull(org_url,'') <> ifnull(?, '')
+         ORDER BY id ASC
+         LIMIT 1`,
+        [...stageList, (env && env.org) || null, (env && env.space) || null, (env && env.org_url) || null]
       );
-      if (row) { hmlEnv = row; break; }
+      if (row) hmlEnv = row;
     }
 
-    // 2) Tentativa por LIKE no início do nome + stage
+    // 2) Tentativa por nome exato e stage
+    if (!hmlEnv) {
+      for (const nm of candNames) {
+        const row = await this.envSvc.db.get(
+          `SELECT id, name, stage, org_url FROM environments
+           WHERE name = ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+             AND ifnull(org_url,'') <> ifnull(?, '')
+           LIMIT 1`, [nm, ...stageList, (env && env.org_url) || null]
+        );
+        if (row) { hmlEnv = row; break; }
+      }
+    }
+
+    // 3) Tentativa por LIKE no início do nome + stage
     if (!hmlEnv && rootName) {
       const row = await this.envSvc.db.get(
-        `SELECT id, name, stage FROM environments
+        `SELECT id, name, stage, org_url FROM environments
          WHERE name LIKE ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+           AND ifnull(org_url,'') <> ifnull(?, '')
          ORDER BY name ASC
-         LIMIT 1`, [rootName + '%', ...stageList]
+         LIMIT 1`, [rootName + '%', ...stageList, (env && env.org_url) || null]
       );
       if (row) hmlEnv = row;
     }
@@ -6403,23 +6345,40 @@ if (usePrdVsHml) {
         `${rootName} - HML`,
         `${rootName}-HML`
       ].filter(Boolean)));
+      const hmlOrgUrl = String(hmlEnv.org_url || '').trim();
 
-      // Union manual: agrupar resultados de várias queries
+      // PRIORIDADE 1: buscar pelo org_url do QAS/HML
       let rows = [];
-      for (const srcKey of sources) {
+      if (hmlOrgUrl) {
         try {
           const r = await this.appsSvc.db.all(
-            `SELECT component, version FROM installed_apps WHERE source = ?`,
-            [srcKey]
+            `SELECT component, version FROM installed_apps
+              WHERE ifnull(org_url,'') = ifnull(?, '')`,
+            [hmlOrgUrl || null]
           );
           if (Array.isArray(r) && r.length) rows = rows.concat(r);
         } catch(_e){}
       }
-      // Fallback por LIKE se nada veio
+
+      // PRIORIDADE 2 (legado): buscar por source do ambiente QAS/HML somente se não vier nada por URL
+      if (!rows.length) {
+        for (const srcKey of sources) {
+          try {
+            const r = await this.appsSvc.db.all(
+              `SELECT component, version FROM installed_apps WHERE source = ?`,
+              [srcKey]
+            );
+            if (Array.isArray(r) && r.length) rows = rows.concat(r);
+          } catch(_e){}
+        }
+      }
+
+      // PRIORIDADE 3 (legado): fallback por LIKE no source
       if (!rows.length && rootName) {
         try {
           const r = await this.appsSvc.db.all(
-            `SELECT component, version FROM installed_apps WHERE source LIKE ?`,
+            `SELECT component, version FROM installed_apps
+              WHERE source LIKE ?`,
             [rootName + '%']
           );
           if (Array.isArray(r) && r.length) rows = rows.concat(r);
@@ -6456,7 +6415,7 @@ const items = ids.map(id => {
         // Fluxo padrão (HML): ambiente atual vs repo Thomson
         return {
           id,
-          prev_version: envMap[id] || installedBest[String(id).toLowerCase()] || null,
+          prev_version: envMap[id] || null,
           repo_version: repoMapDefault[id] || null
         };
       });
@@ -6470,7 +6429,7 @@ const items = ids.map(id => {
         }
       }catch(_e){ try{ console.error('[installed_apps] overview sync error', _e && _e.message || _e); }catch(_){} }
 
-      res.json({ ok:true, items, debug: { total_ids: Array.isArray(ids) ? ids.length : 0, env_versions: Object.keys(envMap || {}).length, installed_versions: Object.keys(installedBest || {}).length, repo_versions: Object.keys(repoMapDefault || {}).length, empresa: empresaKey || null, ambiente: ambienteKey || null } });
+      res.json({ ok:true, items });
     }catch(e){
       res.status(500).json({ ok:false, error: e.message || String(e) });
     }
@@ -6497,7 +6456,7 @@ const items = ids.map(id => {
         : ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf'));
 CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
 
-  const loginArgs = ['login', '-a', env.org_url, '--skip-ssl-validation', '-u', env.username, '-p', ensureCliPasswordSingleQuoted(password)];
+  const loginArgs = ['login', '-a', env.org_url, '--skip-ssl-validation', '-u', env.username, '-p', ensureCliPasswordQuotedForLookup(password)];
       if (env.org)   { loginArgs.push('-o', ensureCliArgQuoted(env.org)); }
       if (env.space) { loginArgs.push('-s', ensureCliArgQuoted(env.space)); }
 
@@ -6575,7 +6534,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
           .replace(/\s*-\s*(PRD|PROD|PRODUCAO|PRODUÇÃO)\s*$/i, '')
           .trim();
 
-        const stageList = ['HML','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
+        const stageList = ['HML','QAS','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
         const candNames = Array.from(new Set([
           rootName,
           `${rootName} - HML`, `${rootName}-HML`,
@@ -6583,24 +6542,42 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
         ].filter(Boolean)));
 
         let hmlEnv = null;
-        // 1) tenta nomes exatos
-        for (const nm of candNames) {
+        // 1) PRIORIDADE: mesma org + mesma space + stage de QAS/HML + URL diferente
+        if (env && (env.org || env.space)) {
           const row = await this.envSvc.db.get(
-            `SELECT id, name, stage FROM environments
-             WHERE name = ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+            `SELECT id, name, stage, org_url FROM environments
+             WHERE UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+               AND ifnull(org,'') = ifnull(?, '')
+               AND ifnull(space,'') = ifnull(?, '')
+               AND ifnull(org_url,'') <> ifnull(?, '')
+             ORDER BY id ASC
              LIMIT 1`,
-            [nm, ...stageList]
+            [...stageList, (env && env.org) || null, (env && env.space) || null, (env && env.org_url) || null]
           );
-          if (row) { hmlEnv = row; break; }
+          if (row) hmlEnv = row;
         }
-        // 2) tenta LIKE
+        // 2) tenta nomes exatos
+        if (!hmlEnv) {
+          for (const nm of candNames) {
+            const row = await this.envSvc.db.get(
+              `SELECT id, name, stage, org_url FROM environments
+               WHERE name = ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+                 AND ifnull(org_url,'') <> ifnull(?, '')
+               LIMIT 1`,
+              [nm, ...stageList, (env && env.org_url) || null]
+            );
+            if (row) { hmlEnv = row; break; }
+          }
+        }
+        // 3) tenta LIKE
         if (!hmlEnv && rootName) {
           const row = await this.envSvc.db.get(
-            `SELECT id, name, stage FROM environments
+            `SELECT id, name, stage, org_url FROM environments
              WHERE name LIKE ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+               AND ifnull(org_url,'') <> ifnull(?, '')
              ORDER BY name ASC
              LIMIT 1`,
-            [rootName + '%', ...stageList]
+            [rootName + '%', ...stageList, (env && env.org_url) || null]
           );
           if (row) hmlEnv = row;
         }
@@ -6612,19 +6589,38 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
             String(hmlEnv.name || ''),
             String(hmlEnv.id || ''),
             rootName,
+            `${rootName} - QAS`, `${rootName}-QAS`,
             `${rootName} - HML`, `${rootName}-HML`
           ].filter(Boolean)));
 
-          for (const k of sources) {
+          const hmlOrgUrl = String(hmlEnv.org_url || '').trim();
+
+          // PRIORIDADE 1: buscar pela URL do QAS/HML
+          if (hmlOrgUrl) {
             const r = await this.appsSvc.db.get(
               `SELECT version FROM installed_apps
-               WHERE LOWER(component) = ? AND source = ?
+               WHERE LOWER(component) = ?
+                 AND ifnull(org_url,'') = ifnull(?, '')
                ORDER BY datetime(installed_at) DESC LIMIT 1`,
-              [compKey, String(k)]
+              [compKey, hmlOrgUrl || null]
             );
-            if (r && r.version) {
-              found = String(r.version).trim();
-              break;
+            if (r && r.version) found = String(r.version).trim();
+          }
+
+          // PRIORIDADE 2 (legado): buscar pelos sources conhecidos do QAS/HML somente se não vier nada por URL
+          if (!found) {
+            for (const k of sources) {
+              const r = await this.appsSvc.db.get(
+                `SELECT version FROM installed_apps
+                 WHERE LOWER(component) = ?
+                   AND source = ?
+                 ORDER BY datetime(installed_at) DESC LIMIT 1`,
+                [compKey, String(k)]
+              );
+              if (r && r.version) {
+                found = String(r.version).trim();
+                break;
+              }
             }
           }
 
@@ -6638,8 +6634,12 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
                  WHERE LOWER(component) = ?
                    AND LOWER(COALESCE(empresa,'')) = LOWER(?)
                    AND UPPER(COALESCE(ambiente,'')) = ?
+                   AND (
+                     ifnull(org_url,'') = ifnull(?, '')
+                     OR ifnull(org_url,'') = ''
+                   )
                  ORDER BY datetime(installed_at) DESC LIMIT 1`,
-                [compKey, empresaBase, String(amb)]
+                [compKey, empresaBase, String(amb), hmlOrgUrl || null]
               );
               if (r && r.version) {
                 found = String(r.version).trim();
@@ -6763,14 +6763,23 @@ async deployStream(req,res){
     }
 
     // 3) Login
-    const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
-    const _quoteIfNeeded = (v) => {
-      return ensureCliArgQuoted(v);
-    };
-    if (env.org)   loginArgs.push('-o', _quoteIfNeeded(env.org));
-    if (env.space) loginArgs.push('-s', _quoteIfNeeded(env.space));
-    send('> ' + CLI_BIN + ' ' + loginArgs.join(' '));
-    const sLogin = await runCmd(CLI_BIN, loginArgs);
+    // IMPORTANTE:
+    // - no deploy a senha deve ir SEM aspas literais
+    // - para evitar interpretação de caracteres especiais pelo shell, usamos spawn com shell:false
+    const runSpawn = (cmd, args=[], opts={}) => new Promise((resolve) => {
+      const child = spawnSafe(cmd, args, { env: (opts && opts.env) ? opts.env : process.env, ...opts });
+      let out = '', err = '';
+      child.stdout.on('data', d => { const s = String(d); out += s; send(s.trimEnd()); });
+      child.stderr.on('data', d => { const s = String(d); err += s; send(s.trimEnd()); });
+      child.on('error', e => resolve({ code:-1, stdout: out, stderr: (err ? err + '\n' : '') + ((e && e.message) || String(e)) }));
+      child.on('close', code => resolve({ code, stdout: out, stderr: err }));
+    });
+
+    const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p', ensureCliPasswordRawForDeploy(password)];
+    if (env.org)   loginArgs.push('-o', ensureCliSpawnRaw(env.org));
+    if (env.space) loginArgs.push('-s', ensureCliSpawnRaw(env.space));
+    send('> ' + CLI_BIN + ' ' + loginArgs.map((v,i)=> loginArgs[i-1]==='-p' ? '********' : v).join(' '));
+    const sLogin = await runSpawn(CLI_BIN, loginArgs);
     if (sLogin.code !== 0) {
       send((sLogin.stderr || sLogin.stdout || 'Falha no login').slice(0,2000));
       sendDone({ ok:false });
@@ -6797,7 +6806,7 @@ async deployStream(req,res){
         const envName = String(env.name || '');
         const rootName = envName          .replace(/\s*-\s*(PRD|PROD|PRODUCAO|PRODUÇÃO)\s*$/i, '')          .replace(/\s*-\s*(QAS|HML|HOMOLOGA(?:C|Ç)AO|HOMOLOG(?:ACAO)?)\s*$/i, '')          .trim();
 
-        const stageList = ['HML','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
+        const stageList = ['HML','QAS','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
         const candNames = Array.from(new Set([
           rootName,
           `${rootName} - HML`, `${rootName}-HML`,
@@ -6807,20 +6816,22 @@ async deployStream(req,res){
         let hmlEnv = null;
         for (const nm of candNames) {
           const row = await this.envSvc.db.get(
-            `SELECT id, name, stage FROM environments
+            `SELECT id, name, stage, org_url FROM environments
              WHERE name = ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+               AND ifnull(org_url,'') <> ifnull(?, '')
              LIMIT 1`,
-            [nm, ...stageList]
+            [nm, ...stageList, (env && env.org_url) || null]
           );
           if (row) { hmlEnv = row; break; }
         }
         if (!hmlEnv && rootName) {
           const row = await this.envSvc.db.get(
-            `SELECT id, name, stage FROM environments
+            `SELECT id, name, stage, org_url FROM environments
              WHERE name LIKE ? AND UPPER(stage) IN (${stageList.map(()=>'?').join(',')})
+               AND ifnull(org_url,'') <> ifnull(?, '')
              ORDER BY name ASC
              LIMIT 1`,
-            [rootName + '%', ...stageList]
+            [rootName + '%', ...stageList, (env && env.org_url) || null]
           );
           if (row) hmlEnv = row;
         }
@@ -6838,17 +6849,37 @@ async deployStream(req,res){
           String(hmlEnv.name||''),
           String(hmlEnv.id||''),
           rootName,
+          `${rootName} - QAS`, `${rootName}-QAS`,
           `${rootName} - HML`, `${rootName}-HML`
         ].filter(Boolean)));
 
+        const hmlOrgUrl = String(hmlEnv.org_url || '').trim();
         for (const k of sources) {
           const r = await this.envSvc.db.get(
             `SELECT version FROM installed_apps
-             WHERE LOWER(component) = ? AND source = ?
+             WHERE LOWER(component) = ?
+               AND (source = ? OR ifnull(org_url,'') = ifnull(?, ''))
              ORDER BY datetime(installed_at) DESC LIMIT 1`,
-            [compKey, String(k)]
+            [compKey, String(k), hmlOrgUrl || null]
           );
           if (r && r.version) { found = String(r.version).trim(); break; }
+        }
+
+        if (!found) {
+          const empresaBase = rootName || String(hmlEnv.name || '').replace(/\s*-\s*(HML|QAS|HOMOLOG(?:ACAO|AÇÃO)?)\s*$/i, '').trim();
+          const ambientesHml = ['HML','QAS','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO'];
+          for (const amb of ambientesHml) {
+            const r = await this.envSvc.db.get(
+              `SELECT version FROM installed_apps
+               WHERE LOWER(component) = ?
+                 AND LOWER(COALESCE(empresa,'')) = LOWER(?)
+                 AND UPPER(COALESCE(ambiente,'')) = ?
+                 AND ifnull(org_url,'') = ifnull(?, '')
+               ORDER BY datetime(installed_at) DESC LIMIT 1`,
+              [compKey, empresaBase, String(amb), hmlOrgUrl || null]
+            );
+            if (r && r.version) { found = String(r.version).trim(); break; }
+          }
         }
 
         if (!found) {
@@ -6878,7 +6909,6 @@ async deployStream(req,res){
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'apps.db');
 
     const fs = require('fs');
-    const { spawn } = require('child_process');
     const axios = require('axios');
 
     // Dica de tipo de ambiente para a resolução de URL (CF vs XS)
@@ -6934,7 +6964,7 @@ send('Iniciando deploy...');
 
 const __mta = withMtaUploadTweaks(
   mtarFileToDeploy,
-  ['deploy', ensureCliArgQuoted(mtarFileToDeploy), '-f'],
+  ['deploy', ensureCliSpawnRaw(mtarFileToDeploy), '-f'],
   process.env
 );
 
@@ -6951,7 +6981,7 @@ const retryDelaySec = Number(process.env.XS_DEPLOY_HTTP_RETRY_DELAY_SEC || 10);
 const runDeploy = (attempt) => {
   let sawHttpCommError = false;
 
-  const child = spawn(CLI_BIN, __mta.args, { shell:true, env: __mta.env });
+  const child = spawnSafe(resolveSpawnCommand(CLI_BIN), __mta.args, { env: __mta.env });
 
   child.stdout.on('data', d => {
     const t = d.toString();
@@ -7000,8 +7030,8 @@ const runDeploy = (attempt) => {
         const src = env && (env.name ? String(env.name) : (env.id != null ? String(env.id) : ''));
         if (compKey && src) {
           const rowPrev = await this.appsSvc.db.get(
-            `SELECT version FROM installed_apps WHERE source=? AND component=? ORDER BY datetime(installed_at) DESC LIMIT 1`,
-            [src, compKey]
+            `SELECT version FROM installed_apps WHERE component=? AND (source=? OR ifnull(org_url,'') = ifnull(?, '')) ORDER BY datetime(installed_at) DESC LIMIT 1`,
+            [compKey, src, (env && env.org_url) || null]
           );
           if (rowPrev && rowPrev.version) {
             prevVersion = String(rowPrev.version).trim();
@@ -7403,7 +7433,7 @@ async rollbackLive(req,res){
        * @param {{any}} opts={}
        */
       const runSpawn = (cmd, args=[], opts={})=> new Promise((resolve)=>{
-        const child = spawn(cmd, args, { shell:true, env: (opts && opts.env) ? opts.env : process.env, ...opts });
+        const child = spawnSafe(cmd, args, { env: (opts && opts.env) ? opts.env : process.env, ...opts });
         child.stdout.on('data', d=> write(String(d).trimEnd()));
         child.stderr.on('data', d=> write(String(d).trimEnd()));
         child.on('close', code => resolve(code));
@@ -7420,10 +7450,10 @@ async rollbackLive(req,res){
           : ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf'));
       }
 
-  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
-      if(env.org) loginArgs.push('-o', ensureCliArgQuoted(env.org));
-      if(env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
-      write('> xs ' + loginArgs.join(' '));
+  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p', ensureCliPasswordRawForDeploy(password)];
+      if(env.org) loginArgs.push('-o', ensureCliSpawnRaw(env.org));
+      if(env.space) loginArgs.push('-s', ensureCliSpawnRaw(env.space));
+      write('> xs ' + loginArgs.map((v,i)=> loginArgs[i-1]==='-p' ? '********' : v).join(' '));
       const loginCode = await runSpawn(CLI_BIN, loginArgs);
       if(loginCode !== 0){ write('Falha no login do ambiente.'); return res.end(); }
 
@@ -7479,7 +7509,7 @@ if (fs.existsSync(outFile)) {
 }
 
       write('Executando rollback: xs deploy <mtar> -version-rule ALL -f');
-      const __mta = withMtaUploadTweaks(mtarFileToDeploy, ['deploy', ensureCliArgQuoted(mtarFileToDeploy), '-version-rule', 'ALL', '-f'], process.env);
+      const __mta = withMtaUploadTweaks(mtarFileToDeploy, ['deploy', ensureCliSpawnRaw(mtarFileToDeploy), '-version-rule', 'ALL', '-f'], process.env);
       const code = await runSpawn(CLI_BIN, __mta.args, { env: __mta.env });
       write('Código de saída: ' + code);
 
@@ -7539,7 +7569,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
       }
 
       const _quoteIfNeeded = (v) => ensureCliArgQuoted(v);
-      const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
+      const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p', ensureCliPasswordQuotedForLookup(password)];
       if (env.org)   loginArgs.push('-o', _quoteIfNeeded(env.org));
       if (env.space) loginArgs.push('-s', _quoteIfNeeded(env.space));
 
@@ -7708,9 +7738,9 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'apps.db');
 
       send('> ' + CLI_NAME + ' login ...');
 
-  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p',ensureCliPasswordSingleQuoted(password)];
-      if(env.org) loginArgs.push('-o', ensureCliArgQuoted(env.org));
-      if(env.space) loginArgs.push('-s', ensureCliArgQuoted(env.space));
+  const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p', ensureCliPasswordRawForDeploy(password)];
+      if(env.org) loginArgs.push('-o', ensureCliSpawnRaw(env.org));
+      if(env.space) loginArgs.push('-s', ensureCliSpawnRaw(env.space));
       /**
        * Função (arrow) runSpawn
        * - O que faz: Procedimento/serviço utilizado no fluxo atual.
@@ -7718,14 +7748,20 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'apps.db');
        * @param {{any}} cmd
        * @param {{any}} args=[]
        */
-      const runSpawn = (cmd, args=[]) => new Promise((resolve)=>{
-        const child = spawn(cmd, args, { shell:true });
-        child.stdout.on('data', d=>{ const s=d.toString(); appendLog(s); send(s.trimEnd()); });
-        child.stderr.on('data', d=>{ const s=d.toString(); appendLog(s); send(s.trimEnd()); });
-        child.on('close', code => resolve(code));
+      const runSpawn = (cmd, args=[], opts={}) => new Promise((resolve)=>{
+        const child = spawnSafe(cmd, args, { env: (opts && opts.env) ? opts.env : process.env, ...opts });
+        let __out = '', __err = '';
+        child.stdout.on('data', d=>{ const s=d.toString(); __out += s; appendLog(s); send(s.trimEnd()); });
+        child.stderr.on('data', d=>{ const s=d.toString(); __err += s; appendLog(s); send(s.trimEnd()); });
+        child.on('error', e => resolve({ code:-1, stdout: __out, stderr: (__err ? __err + '\n' : '') + ((e && e.message) || String(e)) }));
+        child.on('close', code => resolve({ code, stdout: __out, stderr: __err }));
       });
-      const loginCode = await runSpawn(CLI_BIN, loginArgs);
-      if(loginCode !== 0){ send('Falha no login do ambiente.'); sendDone({ok:false}); return res.end(); }
+      const loginResult = await runSpawn(CLI_BIN, loginArgs);
+      if(loginResult.code !== 0){
+        send((loginResult.stderr || loginResult.stdout || 'Falha no login do ambiente.').slice(0,2000));
+        sendDone({ok:false});
+        return res.end();
+      }
 
       send('Consultando deploy_audit...');
       /* strict rollback: version must come from deploy_audit.prev_version */
@@ -7797,7 +7833,7 @@ if (fs.existsSync(outFile)) {
 
       if (!fs.existsSync(mtarFileToDeploy)) { send('Arquivo não encontrado: ' + mtarFileToDeploy); sendDone({ok:false}); return res.end(); }
       send('> ' + CLI_NAME + ' deploy ' + mtarFileToDeploy + ' -version-rule ALL -f');
-      const __mta = withMtaUploadTweaks(mtarFileToDeploy, ['deploy', ensureCliArgQuoted(mtarFileToDeploy), '-version-rule', 'ALL', '-f'], process.env);
+      const __mta = withMtaUploadTweaks(mtarFileToDeploy, ['deploy', ensureCliSpawnRaw(mtarFileToDeploy), '-version-rule', 'ALL', '-f'], process.env);
       const code = await runSpawn(CLI_BIN, __mta.args, { env: __mta.env });
       send('Código de saída: ' + code);
 
@@ -7828,7 +7864,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
   }
 async renderHome(req,res){
     try{
-      const envs = await this.envSvc.listAll();
+      const envs = await this.envSvc.list();
       res.type('html').send(HomeView.html(envs));
     }catch(e){
       console.error('renderHome env list error:', e);
