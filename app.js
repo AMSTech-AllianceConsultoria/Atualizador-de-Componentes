@@ -1021,9 +1021,18 @@ try { await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component`); 
 try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN empresa TEXT`); } catch(_){}
 try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN ambiente TEXT`); } catch(_){}
 try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN org_url TEXT`); } catch(_){}
-;
-    await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component; CREATE INDEX IF NOT EXISTS idx_installed_source_component_env ON installed_apps(source, component, empresa, ambiente, org_url)`);
-await this.db.run(`DROP INDEX IF EXISTS ux_installed_source_component; CREATE UNIQUE INDEX IF NOT EXISTS ux_installed_source_component_env ON installed_apps(source, component, empresa, ambiente, org_url)`);
+try { await this.db.run(`ALTER TABLE installed_apps ADD COLUMN env_key TEXT`); } catch(_){}
+try { await this.db.run(`UPDATE installed_apps SET source='' WHERE source IS NULL`); } catch(_){}
+try { await this.db.run(`UPDATE installed_apps SET empresa='' WHERE empresa IS NULL`); } catch(_){}
+try { await this.db.run(`UPDATE installed_apps SET ambiente='' WHERE ambiente IS NULL`); } catch(_){}
+try { await this.db.run(`UPDATE installed_apps SET org_url='' WHERE org_url IS NULL`); } catch(_){}
+try { await this.db.run(`UPDATE installed_apps SET env_key = lower(component) || '|' || ifnull(source,'') || '|' || ifnull(empresa,'') || '|' || ifnull(ambiente,'') || '|' || ifnull(org_url,'') WHERE ifnull(env_key,'') = ''`); } catch(_){}
+    await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component`);
+    await this.db.run(`DROP INDEX IF EXISTS idx_installed_source_component_env`);
+    await this.db.run(`CREATE INDEX IF NOT EXISTS idx_installed_source_component_env ON installed_apps(source, component, empresa, ambiente, org_url)`);
+    await this.db.run(`DROP INDEX IF EXISTS ux_installed_source_component`);
+    await this.db.run(`DROP INDEX IF EXISTS ux_installed_source_component_env`);
+    await this.db.run(`CREATE INDEX IF NOT EXISTS idx_installed_envkey ON installed_apps(env_key)`);
 
 
     await this.db.run(`
@@ -1162,13 +1171,13 @@ const exp = toLocalSql(new Date(Date.now()+minutes*60*1000));
  * - Observação: Métodos internos seguem as regras originais do código.
  */
 class AppsService {
-  async upsertInstalled(env, component, version){
+  async upsertInstalled(env, component, version, opts = {}){
+    const mode = String((opts && opts.mode) || 'force').toLowerCase();
     try{
       const comp = String(component||'').trim().toLowerCase();
       const ver  = String(version||'0.0.0').trim().replace(/^v/i,'');
-      const src  = env && (env.name ? String(env.name) : (env.id!=null ? String(env.id) : ''));
+      const src  = env && (env.name ? String(env.name).trim() : (env.id!=null ? String(env.id) : ''));
 
-      // Derivar empresa e ambiente
       let empresa = (env && (env.name || env.company_name || env.org)) ? String(env.name || env.company_name || env.org).trim() : '';
       let ambiente = (env && (env.space || env.environment || env.env || env.ambiente)) ? String(env.space || env.environment || env.env || env.ambiente).trim() : '';
       const orgUrl = (env && (env.org_url || env.url)) ? String(env.org_url || env.url).trim() : '';
@@ -1176,41 +1185,62 @@ class AppsService {
         const _m = empresa.match(/\s+(DEV|QAS|PRD|HML|PROD|PRODUCAO|HOMOLOG|PPRD|QA|TEST|STG)$/i);
         if(_m){
           ambiente = _m[1].toUpperCase();
-          empresa = empresa.replace(new RegExp("\\s+"+_m[1]+"$","i"), "").trim();
+          empresa = empresa.replace(new RegExp("\s+"+_m[1]+"$","i"), "").trim();
         }
       }
-if(!comp || !ver || !src) return;
+      if(!comp || !ver || !src) return;
 
-      // Checagem: ler a versão atual para este source/componente
-      const row = await this.db.get(
-        `SELECT version FROM installed_apps WHERE source=? AND component=? AND empresa=? AND ambiente=? AND ifnull(org_url,'') = ifnull(?, '')`,
-        [src, comp, empresa || null, ambiente || null, orgUrl || null]
-      );
+      const envKey = `${comp}|${src || ''}|${empresa || ''}|${ambiente || ''}|${orgUrl || ''}`;
+      const vkey = (v) => String(v || '0').replace(/^v/i,'').split('.').map(x => String(parseInt(x || '0', 10)).padStart(6,'0')).join('');
 
-      if (!row){
-        // Inserir apenas se não existir
-        await this.db.run(
-          `INSERT INTO installed_apps(component,version,source,empresa,ambiente,org_url) VALUES (?,?,?,?,?,?)`,
-          [comp, ver, src, empresa || null, ambiente || null, orgUrl || null]
+      let row = null;
+
+      if (orgUrl) {
+        row = await this.db.get(
+          `SELECT id, version, env_key, org_url FROM installed_apps WHERE lower(component)=? AND ifnull(env_key,'')=? ORDER BY id DESC LIMIT 1`,
+          [comp, envKey]
         );
-        try{ console.log('[installed_apps] insert', {source:src, component:comp, version:ver}); }catch(_){}
+      }
+
+      if (!row) {
+        row = await this.db.get(
+          `SELECT id, version, env_key, org_url FROM installed_apps WHERE lower(component)=? AND ifnull(source,'')=? AND ifnull(ambiente,'')=? ORDER BY id DESC LIMIT 1`,
+          [comp, src || '', ambiente || '']
+        );
+      }
+
+      if (!row && empresa) {
+        row = await this.db.get(
+          `SELECT id, version, env_key, org_url FROM installed_apps WHERE lower(component)=? AND ifnull(source,'')=? AND ifnull(empresa,'')=? ORDER BY id DESC LIMIT 1`,
+          [comp, src || '', empresa || '']
+        );
+      }
+
+      if (!row) {
+        await this.db.run(
+          `INSERT INTO installed_apps(component,version,source,empresa,ambiente,org_url,env_key,installed_at) VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))`,
+          [comp, ver, src || '', empresa || '', ambiente || '', orgUrl || '', envKey]
+        );
+        try{ console.log('[installed_apps] insert', {source:src, component:comp, version:ver, ambiente, orgUrl, envKey, mode}); }catch(_){ }
         return;
       }
 
-      const cur = String(row.version||'').trim();
-      if (cur === ver){
-        // Sem mudança: não atualizar
-        try{ console.log('[installed_apps] noop (unchanged)', {source:src, component:comp, version:ver}); }catch(_){}
+      const cur = String(row.version||'').trim().replace(/^v/i,'');
+      if (mode === 'detected' && vkey(ver) < vkey(cur)) {
+        try{ console.log('[installed_apps] noop (stale-detected-version)', {source:src, component:comp, current:cur, detected:ver, rowId:row.id}); }catch(_){ }
+        return;
+      }
+      if (cur === ver && String(row.env_key || '') === envKey){
+        try{ console.log('[installed_apps] noop (unchanged)', {source:src, component:comp, version:ver, rowId:row.id}); }catch(_){ }
         return;
       }
 
-      // Houve mudança: atualizar
       await this.db.run(
-        `UPDATE installed_apps SET version=?, installed_at=datetime('now','localtime'), org_url=? WHERE source=? AND component=? AND empresa=? AND ambiente=? AND ifnull(org_url,'') = ifnull(?, '')`,
-        [ver, orgUrl || null, src, comp, empresa || null, ambiente || null, orgUrl || null]
+        `UPDATE installed_apps SET version=?, source=?, empresa=?, ambiente=?, org_url=?, env_key=?, installed_at=datetime('now','localtime') WHERE id=?`,
+        [ver, src || '', empresa || '', ambiente || '', orgUrl || '', envKey, row.id]
       );
-      try{ console.log('[installed_apps] update', {source:src, component:comp, from:cur, to:ver}); }catch(_){}
-    }catch(_e){ /* noop */ }
+      try{ console.log('[installed_apps] update', {source:src, component:comp, from:cur, to:ver, rowId:row.id, ambiente, orgUrl, envKey, mode}); }catch(_){ }
+    }catch(_e){ try{ console.error('[installed_apps] error', _e && _e.message || _e); }catch(_){} }
 
   }
 
@@ -6425,7 +6455,7 @@ const items = ids.map(id => {
       try{
         for (const it of items){
           if (it && it.prev_version){
-            await this.appsSvc.upsertInstalled(env, it.id, it.prev_version);
+            await this.appsSvc.upsertInstalled(env, it.id, it.prev_version, { mode: 'detected' });
           }
         }
       }catch(_e){ try{ console.error('[installed_apps] overview sync error', _e && _e.message || _e); }catch(_){} }
@@ -6497,6 +6527,15 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
         ]
       );
 
+      try {
+        if (clientVersion) {
+          await this.appsSvc.upsertInstalled(env, objectId, clientVersion, { mode: 'detected' });
+          try{ console.log('[installed_apps] persisted (objectEnvStatus)', { objectId, env: env && (env.name || env.id), version: clientVersion }); }catch(_){ }
+        } else {
+          try{ console.log('[installed_apps] objectEnvStatus skipped (no clientVersion detected)', { objectId, env: env && (env.name || env.id) }); }catch(_){ }
+        }
+      } catch(_e) { try{ console.error('[installed_apps] objectEnvStatus persist error', _e && _e.message || _e); }catch(_){ } }
+
       res.json({ ok:true, clientVersion });
     }catch(e){
       res.status(500).json({ ok:false, error: e.message || String(e) });
@@ -6507,7 +6546,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
     // Início do fluxo de deploy: aqui vamos identificar o ambiente e,
     // se for PRD, descobrir a versão instalada na Homologação para amarrar no token.
     try {
-      const { envId, objectId, password, ticket, packageSource } = req.body || {};
+      const { envId, objectId, password, ticket, packageSource, deployVersion } = req.body || {};
       if (!envId || !objectId || !password) {
         return res.status(400).json({ ok:false, error: 'Parâmetros insuficientes' });
       }
@@ -7060,7 +7099,7 @@ const runDeploy = (attempt) => {
       // Atualizar tabela installed_apps somente em caso de sucesso
       if (ok) {
         try {
-          await this.appsSvc.upsertInstalled(env, objectId, repoVersion);
+          await this.appsSvc.upsertInstalled(env, objectId, repoVersion, { mode: 'force' });
         } catch (_) {}
       }
     } catch (_) {}
@@ -7531,7 +7570,7 @@ if (fs.existsSync(outFile)) {
 try{ console.log('[audit] inserted', {env_id: env && env.id, empresa: (typeof __empresa!=='undefined'?__empresa: (env && (env.name||env.company_name))), ambiente: (typeof __ambiente!=='undefined'?__ambiente: (env && env.space)), objectId}); }catch(_){ }
 try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.company_name), ambiente: env && env.space, objectId}); }catch(_){ }
 // Persistir instalação após rollback bem-sucedido
-      if (code===0){ try{ await this.appsSvc.upsertInstalled(env, objectId, targetVersion); console.log('[installed_apps] persisted (rollbackStream)', {objectId, env: env && (env.name||env.id), version: targetVersion}); }catch(_e){} }
+      if (code===0){ try{ await this.appsSvc.upsertInstalled(env, objectId, targetVersion, { mode: 'force' }); console.log('[installed_apps] persisted (rollbackStream)', {objectId, env: env && (env.name||env.id), version: targetVersion}); }catch(_e){} }
 
       }catch(_){}
 
@@ -7627,7 +7666,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
   if (req && req.body && !req.body.ticket) req.body.ticket = _t;
 }
 // --- fim ticket obrigatório (inline) ---
- try{ const { envId, objectId, password, ticket, packageSource } = req.body || {};
+ try{ const { envId, objectId, password, ticket, packageSource, deployVersion } = req.body || {};
       if(!envId || !objectId || !password) return res.status(400).json({ok:false,error:'Parâmetros insuficientes'});
       if(!req.session?.user) return res.status(401).json({ok:false,error:'Unauthorized'});
       const t = uuidv4();
