@@ -83,22 +83,20 @@ const getCliPair = (env) => {
  */
 function ensureCliArgQuoted(val) {
   if (val == null) return '';
-  const s = String(val);
-  if (/^[A-Za-z0-9._@!:\-]+$/.test(s)) return s; // no spaces/specials
-  // escape double quotes inside
-  const esc = s.replace(/"/g, '\"');
-  return `"${esc}"`;
+  // IMPORTANTE:
+  // runCmd/spawnSafe usam shell:false e enviam cada argumento isoladamente.
+  // Portanto, adicionar aspas literais aqui quebra org/space com espaços,
+  // pois a CLI recebe o caractere de aspas como parte do valor.
+  return String(val);
 }
-
 // Password handling
-// Cenário validado neste projeto:
-// - consultas/leitura de ambiente funcionam melhor quando a senha vai entre aspas simples
-// - deploy/rollback/autenticação operacional devem enviar a senha sem aspas literais
+// IMPORTANTE:
+// runCmd/spawnSafe usam shell:false e enviam cada argumento isoladamente.
+// Portanto, a senha NÃO deve receber aspas literais no fluxo de lookup,
+// senão caracteres especiais passam a incluir as aspas no valor e o login falha.
 function ensureCliPasswordQuotedForLookup(val) {
   if (val == null) return '';
-  const s = String(val);
-  if (!/[^A-Za-z0-9]/.test(s)) return s;
-  return `'${s.replace(/'/g, "\\'")}'`;
+  return String(val);
 }
 function ensureCliPasswordRawForDeploy(val) {
   if (val == null) return '';
@@ -3316,6 +3314,9 @@ try{
 }
     var d = await r.json();
     var sel = $('#objSelect');
+    if(!sel){
+      return;
+    }
     sel.innerHTML='';
     // placeholder removido por solicitação do usuário
 (Array.isArray(d?.items)?d.items:[]).forEach(function(it){
