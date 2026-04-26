@@ -1246,6 +1246,16 @@ class AppsService {
 
   __normComp(s){ try{ return String(s||'').trim().toLowerCase(); }catch(_){ return String(s||''); } }
   __normVer(v){ try{ return String(v||'0.0.0').trim().replace(/^v/i,''); }catch(_){ return String(v||'0.0.0'); } }
+  __mtarVersionOverride(id, version){
+    const normalizedId = String(id || '').trim().toLowerCase();
+    const normalizedVersion = String(version || '').trim().replace(/^v/i,'');
+    const overrides = {
+      // Correção pontual: o repositório não possui tax4b.ec87-odata-1.162.2.mtar.
+      // O MTAR disponível/correto para este componente é tax4b.ec87-odata_1.162.1.mtar.
+      'tax4b.ec87-odata|1.162.2': '1.162.1'
+    };
+    return overrides[`${normalizedId}|${normalizedVersion}`] || normalizedVersion || version;
+  }
 
   constructor(db){
     this.db=db;
@@ -1358,6 +1368,7 @@ class AppsService {
   }
   async latestVersionFor(id){
     const normalizedId = String(id || '').trim();
+    if (normalizedId === 'tax4b.ec87-odata') return '1.162.1';
     const repoBrowseMap = {
       'tax4b.automacao': {
         browseUrl: 'https://onesource4sap-repository.thomsonreuters.com/content/browse/release/mtar_18/automacao-backend_tax4b',
@@ -1412,6 +1423,7 @@ class AppsService {
   }
   async buildCandidates(id, version, opts = {}){
     const normalizedId = String(id || '').trim();
+    version = this.__mtarVersionOverride(normalizedId, version);
     const isApuracaoSpecial = ['tax4b.apuracao_tax4b', 'apuracao_tax4b'].includes(normalizedId);
     const isAutomacaoSpecial = (normalizedId === 'tax4b.automacao');
     const isShadowTabUiSpecial = ['shadow_tab-ui', 'tax4b.shadow_tab-ui'].includes(normalizedId);
@@ -1518,6 +1530,7 @@ class AppsService {
   async buildMtarUrl(id, version){
     // Mantém compatível se alguém ainda chamar este método: usa o candidato principal (underscore).
     const normalizedId = String(id || '').trim();
+    version = this.__mtarVersionOverride(normalizedId, version);
     const isApuracaoSpecial = ['tax4b.apuracao_tax4b', 'apuracao_tax4b'].includes(normalizedId);
     const isAutomacaoSpecial = (normalizedId === 'tax4b.automacao');
     const isShadowTabUiSpecial = ['shadow_tab-ui', 'tax4b.shadow_tab-ui'].includes(normalizedId);
