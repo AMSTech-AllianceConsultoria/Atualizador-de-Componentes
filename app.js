@@ -1246,16 +1246,6 @@ class AppsService {
 
   __normComp(s){ try{ return String(s||'').trim().toLowerCase(); }catch(_){ return String(s||''); } }
   __normVer(v){ try{ return String(v||'0.0.0').trim().replace(/^v/i,''); }catch(_){ return String(v||'0.0.0'); } }
-  __mtarVersionOverride(id, version){
-    const normalizedId = String(id || '').trim().toLowerCase();
-    const normalizedVersion = String(version || '').trim().replace(/^v/i,'');
-    const overrides = {
-      // Correção pontual: o repositório não possui tax4b.ec87-odata-1.162.2.mtar.
-      // O MTAR disponível/correto para este componente é tax4b.ec87-odata_1.162.1.mtar.
-      'tax4b.ec87-odata|1.162.2': '1.162.1'
-    };
-    return overrides[`${normalizedId}|${normalizedVersion}`] || normalizedVersion || version;
-  }
 
   constructor(db){
     this.db=db;
@@ -1368,7 +1358,6 @@ class AppsService {
   }
   async latestVersionFor(id){
     const normalizedId = String(id || '').trim();
-    if (normalizedId === 'tax4b.ec87-odata') return '1.162.1';
     const repoBrowseMap = {
       'tax4b.automacao': {
         browseUrl: 'https://onesource4sap-repository.thomsonreuters.com/content/browse/release/mtar_18/automacao-backend_tax4b',
@@ -1423,7 +1412,6 @@ class AppsService {
   }
   async buildCandidates(id, version, opts = {}){
     const normalizedId = String(id || '').trim();
-    version = this.__mtarVersionOverride(normalizedId, version);
     const isApuracaoSpecial = ['tax4b.apuracao_tax4b', 'apuracao_tax4b'].includes(normalizedId);
     const isAutomacaoSpecial = (normalizedId === 'tax4b.automacao');
     const isShadowTabUiSpecial = ['shadow_tab-ui', 'tax4b.shadow_tab-ui'].includes(normalizedId);
@@ -1530,7 +1518,6 @@ class AppsService {
   async buildMtarUrl(id, version){
     // Mantém compatível se alguém ainda chamar este método: usa o candidato principal (underscore).
     const normalizedId = String(id || '').trim();
-    version = this.__mtarVersionOverride(normalizedId, version);
     const isApuracaoSpecial = ['tax4b.apuracao_tax4b', 'apuracao_tax4b'].includes(normalizedId);
     const isAutomacaoSpecial = (normalizedId === 'tax4b.automacao');
     const isShadowTabUiSpecial = ['shadow_tab-ui', 'tax4b.shadow_tab-ui'].includes(normalizedId);
@@ -6299,7 +6286,14 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
       let usePrdVsHml = false;
       try {
         const _stage = (env && env.stage ? String(env.stage).toUpperCase() : '');
-        if (_stage === 'PRD') usePrdVsHml = true;
+        const _name  = (env && env.name  ? String(env.name).toUpperCase()  : '');
+        const _origem = (env && env.origem ? String(env.origem).toUpperCase() : '');
+        // Ambiente produtivo pode estar marcado em stage, no nome, ou em origem em bases antigas.
+        if (_stage === 'PRD' || _stage === 'PROD' || _stage === 'PRODUCAO' || _stage === 'PRODUÇÃO' ||
+            /(^|[\s\-_])(PRD|PROD|PRODUCAO|PRODUÇÃO)([\s\-_]|$)/i.test(_name) ||
+            _origem === 'PRD' || _origem === 'PROD') {
+          usePrdVsHml = true;
+        }
       } catch(_e){}
 
       // Helper para ordenar versões semânticas simples n.n.n
@@ -6377,21 +6371,78 @@ if (usePrdVsHml) {
       if (row) hmlEnv = row;
     }
 
-    // Coleta install de HML correspondente
+    // Coleta versões do QAS/HML correspondente.
+    // Primeiro tenta consultar o ambiente QAS/HML real via CLI, porque a tabela
+    // installed_apps pode ainda não ter sido populada para este ambiente.
+    // Se a consulta direta falhar, usa o cache local como fallback.
     if (hmlEnv) {
+      const hmlEnvFull = await this.envSvc.getById(Number(hmlEnv.id)).catch(() => null);
+      const qasEnv = hmlEnvFull || hmlEnv;
+      const qasBest = {};
+
+      try {
+        let qasApiUrl = String((qasEnv && qasEnv.org_url) || '').trim().replace(/\/+$/, '');
+        if (qasApiUrl && !/^https?:\/\//i.test(qasApiUrl)) qasApiUrl = 'https://' + qasApiUrl;
+
+        const qasRawType = String((qasEnv && qasEnv.env_type) || '').trim().toUpperCase();
+        const qasNormType = (qasRawType === 'CLOUD FOUNDRY') ? 'CF' : ((qasRawType === 'XSA') ? 'XS' : qasRawType);
+        const qasIsCf = (qasNormType === 'CF') || /\bapi\.cf\./i.test(qasApiUrl);
+        const qasCliBin = qasIsCf
+          ? ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf')
+          : ((process.env.XS_BIN && process.env.XS_BIN.trim()) || 'xs');
+
+        const qasLoginArgs = ['login', '-a', qasApiUrl, '--skip-ssl-validation', '-u', qasEnv.username, '-p', ensureCliPasswordQuotedForLookup(password)];
+        if (qasIsCf && qasEnv.origin) qasLoginArgs.push('--origin', String(qasEnv.origin));
+        if (qasEnv.org) qasLoginArgs.push('-o', ensureCliArgQuoted(qasEnv.org));
+        if (qasEnv.space) qasLoginArgs.push('-s', ensureCliArgQuoted(qasEnv.space));
+
+        let qasLogin = await runCmd(qasCliBin, qasLoginArgs);
+
+        // Fallback CF: api -> auth -> target, útil quando o cf login direto falha por origin/target.
+        if (qasLogin.code !== 0 && qasIsCf) {
+          const rApi = await runCmd(qasCliBin, ['api', qasApiUrl, '--skip-ssl-validation']);
+          const authArgs = ['auth', qasEnv.username, String(password)];
+          if (qasEnv.origin) authArgs.push('--origin', String(qasEnv.origin));
+          const rAuth = await runCmd(qasCliBin, authArgs);
+          const tgtArgs = ['target'];
+          if (qasEnv.org) tgtArgs.push('-o', ensureCliArgQuoted(qasEnv.org));
+          if (qasEnv.space) tgtArgs.push('-s', ensureCliArgQuoted(qasEnv.space));
+          const rTarget = await runCmd(qasCliBin, tgtArgs);
+          if (rApi.code === 0 && rAuth.code === 0 && rTarget.code === 0) {
+            qasLogin = { code: 0, stdout: rTarget.stdout || '', stderr: rTarget.stderr || '' };
+          }
+        }
+
+        if (qasLogin.code === 0) {
+          const qasMtas = await runCmd(qasCliBin, ['mtas']);
+          if (qasMtas.code === 0) {
+            const qasLines = (qasMtas.stdout || '').split(/\r?\n/);
+            for (const id of ids) {
+              const v = extractClientVersionFromLines(qasLines, id);
+              if (v) qasBest[String(id).trim().toLowerCase()] = String(v).trim().replace(/^v/i, '');
+            }
+          } else {
+            try { console.error('[overview][QAS] falha ao executar mtas', qasMtas.stderr || qasMtas.stdout); } catch(_) {}
+          }
+        } else {
+          try { console.error('[overview][QAS] falha no login', qasLogin.stderr || qasLogin.stdout); } catch(_) {}
+        }
+      } catch(_e) {
+        try { console.error('[overview][QAS] consulta direta falhou', _e && _e.message || _e); } catch(_) {}
+      }
+
       // Buscar installed por várias chaves possíveis de 'source'
       const sources = Array.from(new Set([
-        String(hmlEnv.name||''),
-        String(hmlEnv.id||''),
+        String(qasEnv.name||''),
+        String(qasEnv.id||''),
         rootName,
         `${rootName} - QAS`,
         `${rootName}-QAS`,
         `${rootName} - HML`,
         `${rootName}-HML`
       ].filter(Boolean)));
-      const hmlOrgUrl = String(hmlEnv.org_url || '').trim();
+      const hmlOrgUrl = String(qasEnv.org_url || '').trim();
 
-      // PRIORIDADE 1: buscar pelo org_url do QAS/HML
       let rows = [];
       if (hmlOrgUrl) {
         try {
@@ -6404,7 +6455,6 @@ if (usePrdVsHml) {
         } catch(_e){}
       }
 
-      // PRIORIDADE 2 (legado): buscar por source do ambiente QAS/HML somente se não vier nada por URL
       if (!rows.length) {
         for (const srcKey of sources) {
           try {
@@ -6417,7 +6467,6 @@ if (usePrdVsHml) {
         }
       }
 
-      // PRIORIDADE 3 (legado): fallback por LIKE no source
       if (!rows.length && rootName) {
         try {
           const r = await this.appsSvc.db.all(
@@ -6429,14 +6478,7 @@ if (usePrdVsHml) {
         } catch(_e){}
       }
 
-      // Consolidar "melhor" versão por componente
-      const best = {};
-      /**
-       * Função (arrow) _vkey
-       * - O que faz: Procedimento/serviço utilizado no fluxo atual.
-       * - Retorno: Conforme uso do chamador.
-       * @param {{any}} v
-       */
+      const best = { ...qasBest };
       const _vkey = (v) => String(v||'0').split('.').map(x=>String(x).padStart(3,'0')).join('');
       for (const r of rows) {
         if (!r || !r.component) continue;
@@ -6445,9 +6487,247 @@ if (usePrdVsHml) {
         if (!ver) continue;
         if (!best[comp] || _vkey(ver) > _vkey(best[comp])) best[comp] = ver;
       }
+
       hmlInstalledBest = best;
+
+      // Persiste o resultado direto do QAS/HML para acelerar próximas consultas.
+      try {
+        for (const [comp, ver] of Object.entries(qasBest)) {
+          if (comp && ver) await this.appsSvc.upsertInstalled(qasEnv, comp, ver, { mode: 'detected' });
+        }
+      } catch(_e) {
+        try { console.error('[overview][QAS] falha ao persistir cache', _e && _e.message || _e); } catch(_) {}
+      }
     }
+
+
+  // Fallback amplo: quando o pareamento PRD -> QAS/HML não é encontrado pelo nome/org/space,
+  // consulta todos os ambientes cadastrados como QAS/HML e usa o primeiro que trouxer MTAs.
+  // Isso evita tela com "-" em Versão QAS quando a empresa PRD tem nomenclatura diferente da QAS.
+  try {
+    const hasQasVersions = hmlInstalledBest && Object.keys(hmlInstalledBest).length > 0;
+    if (usePrdVsHml && !hasQasVersions) {
+      const qasRows = await this.envSvc.db.all(
+        `SELECT id, name, stage, origem, org_url, org, space, username, env_type, origin
+           FROM environments
+          WHERE id <> ?
+            AND (
+                 UPPER(ifnull(stage,'')) IN ('HML','QAS','QA','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO')
+              OR UPPER(ifnull(origem,'')) IN ('QAS','HML','QA')
+              OR UPPER(ifnull(name,'')) LIKE '%QAS%'
+              OR UPPER(ifnull(name,'')) LIKE '%HML%'
+              OR UPPER(ifnull(name,'')) LIKE '%HOMOLOG%'
+            )
+          ORDER BY
+            CASE
+              WHEN ifnull(org,'') = ifnull(?, '') AND ifnull(space,'') = ifnull(?, '') THEN 0
+              WHEN ifnull(org,'') = ifnull(?, '') THEN 1
+              WHEN UPPER(ifnull(name,'')) LIKE ? THEN 2
+              ELSE 3
+            END,
+            id ASC`,
+        [env.id, env.org || '', env.space || '', env.org || '', '%' + String(env.name || '').replace(/\s*(PRD|PROD|PRODUCAO|PRODUÇÃO)\s*$/i,'').trim().toUpperCase() + '%']
+      ).catch(() => []);
+
+      const aggregateBest = {};
+      const scanLogs = [];
+
+      for (const candidate of (qasRows || [])) {
+        try {
+          const qasEnv = await this.envSvc.getById(Number(candidate.id)).catch(() => candidate);
+          let qasApiUrl = String((qasEnv && qasEnv.org_url) || '').trim().replace(/\/+$/, '');
+          if (!qasApiUrl) continue;
+          if (String(qasApiUrl).trim() === String(env.org_url || '').trim()) continue;
+          if (!/^https?:\/\//i.test(qasApiUrl)) qasApiUrl = 'https://' + qasApiUrl;
+
+          const qasRawType = String((qasEnv && qasEnv.env_type) || '').trim().toUpperCase();
+          const qasNormType = (qasRawType === 'CLOUD FOUNDRY') ? 'CF' : ((qasRawType === 'XSA') ? 'XS' : qasRawType);
+          const qasIsCf = (qasNormType === 'CF') || /\bapi\.cf\./i.test(qasApiUrl);
+          const qasCliBin = qasIsCf
+            ? ((process.env.CF_BIN && process.env.CF_BIN.trim()) || 'cf')
+            : ((process.env.XS_BIN && process.env.XS_BIN.trim()) || 'xs');
+
+          const qasLoginArgs = ['login', '-a', qasApiUrl, '--skip-ssl-validation', '-u', qasEnv.username, '-p', ensureCliPasswordQuotedForLookup(password)];
+          if (qasIsCf && qasEnv.origin) qasLoginArgs.push('--origin', String(qasEnv.origin));
+          if (qasEnv.org) qasLoginArgs.push('-o', ensureCliArgQuoted(qasEnv.org));
+          if (qasEnv.space) qasLoginArgs.push('-s', ensureCliArgQuoted(qasEnv.space));
+
+          let qasLogin = await runCmd(qasCliBin, qasLoginArgs);
+          if (qasLogin.code !== 0 && qasIsCf) {
+            const rApi = await runCmd(qasCliBin, ['api', qasApiUrl, '--skip-ssl-validation']);
+            const authArgs = ['auth', qasEnv.username, String(password)];
+            if (qasEnv.origin) authArgs.push('--origin', String(qasEnv.origin));
+            const rAuth = await runCmd(qasCliBin, authArgs);
+            const tgtArgs = ['target'];
+            if (qasEnv.org) tgtArgs.push('-o', ensureCliArgQuoted(qasEnv.org));
+            if (qasEnv.space) tgtArgs.push('-s', ensureCliArgQuoted(qasEnv.space));
+            const rTarget = await runCmd(qasCliBin, tgtArgs);
+            if (rApi.code === 0 && rAuth.code === 0 && rTarget.code === 0) {
+              qasLogin = { code: 0, stdout: rTarget.stdout || '', stderr: rTarget.stderr || '' };
+            }
+          }
+
+          if (qasLogin.code !== 0) {
+            scanLogs.push(`login-fail:${candidate.id}:${candidate.name}`);
+            continue;
+          }
+
+          const qasMtas = await runCmd(qasCliBin, ['mtas']);
+          if (qasMtas.code !== 0) {
+            scanLogs.push(`mtas-fail:${candidate.id}:${candidate.name}`);
+            continue;
+          }
+
+          const qasLines = (qasMtas.stdout || '').split(/\r?\n/);
+          let foundCount = 0;
+          for (const id of ids) {
+            const v = extractClientVersionFromLines(qasLines, id);
+            if (v) {
+              const key = String(id).trim().toLowerCase();
+              const cleanV = String(v).trim().replace(/^v/i, '');
+              if (!aggregateBest[key] || _vkey(cleanV) > _vkey(aggregateBest[key])) aggregateBest[key] = cleanV;
+              foundCount++;
+            }
+          }
+          scanLogs.push(`ok:${candidate.id}:${candidate.name}:found=${foundCount}`);
+
+          // Se achou versões nesse QAS/HML, persiste e para para evitar misturar empresas diferentes.
+          if (foundCount > 0) {
+            try {
+              for (const [comp, ver] of Object.entries(aggregateBest)) {
+                await this.appsSvc.upsertInstalled(qasEnv, comp, ver, { mode: 'detected' });
+              }
+            } catch(_persistErr) {}
+            hmlInstalledBest = aggregateBest;
+            break;
+          }
+        } catch(scanErr) {
+          try { scanLogs.push(`error:${candidate && candidate.id}:${scanErr && scanErr.message || scanErr}`); } catch(_) {}
+        }
+      }
+
+      try { console.log('[overview][QAS][fallback-scan]', scanLogs.join(' | ')); } catch(_) {}
+    }
+  } catch(_fallbackErr) {
+    try { console.error('[overview][QAS][fallback-scan] falhou', _fallbackErr && _fallbackErr.message || _fallbackErr); } catch(_) {}
+  }
+
   } catch(_e){ hmlInstalledBest = null; }
+
+  // === Fallback final para PRD: recuperar versões QAS/HML do histórico/cache local ===
+  try {
+    const hasQas = hmlInstalledBest && Object.keys(hmlInstalledBest).length > 0;
+    if (usePrdVsHml && !hasQas) {
+      const normalizeText = (v) => String(v || '')
+        .toUpperCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\b(PRD|PROD|PRODUCAO|PRODUCTION|QAS|HML|QA|HOMOLOG|HOMOLOGACAO|HOMOLOGAÇÃO)\b/g, ' ')
+        .replace(/[^A-Z0-9]+/g, ' ')
+        .trim();
+
+      const root = normalizeText(env && env.name);
+      const rootTokens = new Set(root.split(/\s+/).filter(Boolean));
+      const scoreCandidate = (row) => {
+        const nm = normalizeText(row && row.name);
+        const tokens = nm.split(/\s+/).filter(Boolean);
+        let score = 0;
+        for (const t of tokens) if (rootTokens.has(t)) score += 10;
+        if (env && row && String(row.org || '') && String(row.org || '') === String(env.org || '')) score += 5;
+        if (env && row && String(row.space || '') && String(row.space || '') === String(env.space || '')) score += 3;
+        return score;
+      };
+
+      const qasCandidates = await this.envSvc.db.all(
+        `SELECT id, name, stage, origem, org_url, org, space, username, env_type
+           FROM environments
+          WHERE id <> ?
+            AND (
+                 UPPER(ifnull(stage,'')) IN ('HML','QAS','QA','HOMOLOG','HOMOLOGACAO','HOMOLOGAÇÃO')
+              OR UPPER(ifnull(origem,'')) IN ('QAS','HML','QA')
+              OR UPPER(ifnull(name,'')) LIKE '%QAS%'
+              OR UPPER(ifnull(name,'')) LIKE '%HML%'
+              OR UPPER(ifnull(name,'')) LIKE '%HOMOLOG%'
+            )`, [env.id]
+      ).catch(() => []);
+
+      const ranked = (qasCandidates || [])
+        .map(r => ({ row: r, score: scoreCandidate(r) }))
+        .sort((a,b) => b.score - a.score || Number(a.row.id || 0) - Number(b.row.id || 0));
+
+      const best = {};
+      const put = (component, version) => {
+        const c = String(component || '').trim().toLowerCase();
+        const v = String(version || '').trim().replace(/^v/i, '');
+        if (!c || !/^\d+(?:\.\d+){1,3}$/.test(v)) return;
+        if (!best[c] || _vkey(v) > _vkey(best[c])) best[c] = v;
+      };
+
+      for (const item of ranked) {
+        const c = item.row;
+        const orgUrlRaw = String(c.org_url || '').replace(/\/+$/, '');
+        const candidateSources = Array.from(new Set([
+          String(c.id || ''),
+          String(c.name || ''),
+          orgUrlRaw
+        ].filter(Boolean)));
+
+        for (const src of candidateSources) {
+          try {
+            const rows = await this.appsSvc.db.all(
+              `SELECT component, version FROM installed_apps
+                WHERE source = ? OR env_key LIKE ? OR ifnull(org_url,'') = ? OR ifnull(org_url,'') = ?`,
+              [src, '%|' + src + '|%', src, src.replace(/^https?:\/\//i, '')]
+            );
+            for (const r of (rows || [])) put(r.component, r.version);
+          } catch(_e) {}
+        }
+
+        try {
+          const rows = await this.appsSvc.db.all(
+            `SELECT object_id AS component, client_version AS version
+               FROM object_version_audit
+              WHERE env_id = ?
+                AND client_version IS NOT NULL
+                AND id IN (
+                  SELECT MAX(id) FROM object_version_audit
+                   WHERE env_id = ? AND client_version IS NOT NULL
+                   GROUP BY object_id
+                )`,
+            [c.id, c.id]
+          );
+          for (const r of (rows || [])) put(r.component, r.version);
+        } catch(_e) {}
+
+        try {
+          const rows = await this.appsSvc.db.all(
+            `SELECT object_id AS component, new_version AS version
+               FROM deploy_audit
+              WHERE env_id = ?
+                AND new_version IS NOT NULL
+                AND id IN (
+                  SELECT MAX(id) FROM deploy_audit
+                   WHERE env_id = ? AND new_version IS NOT NULL
+                   GROUP BY object_id
+                )`,
+            [c.id, c.id]
+          );
+          for (const r of (rows || [])) put(r.component, r.version);
+        } catch(_e) {}
+
+        if (Object.keys(best).length > 0 && item.score > 0) break;
+      }
+
+      if (Object.keys(best).length > 0) {
+        hmlInstalledBest = best;
+        try { console.log('[overview][QAS][local-cache-final] versões recuperadas:', Object.keys(best).length); } catch(_) {}
+      } else {
+        try { console.log('[overview][QAS][local-cache-final] nenhuma versão QAS/HML encontrada no cache/auditoria'); } catch(_) {}
+      }
+    }
+  } catch(_finalCacheErr) {
+    try { console.error('[overview][QAS][local-cache-final] falhou', _finalCacheErr && _finalCacheErr.message || _finalCacheErr); } catch(_) {}
+  }
 }
 const items = ids.map(id => {
         if (usePrdVsHml) {
@@ -6467,8 +6747,9 @@ const items = ids.map(id => {
       /* sync installed from overview */
       try{
         for (const it of items){
-          if (it && it.prev_version){
-            await this.appsSvc.upsertInstalled(env, it.id, it.prev_version, { mode: 'detected' });
+          const detectedVersion = usePrdVsHml ? it.repo_version : it.prev_version;
+          if (it && detectedVersion){
+            await this.appsSvc.upsertInstalled(env, it.id, detectedVersion, { mode: 'detected' });
           }
         }
       }catch(_e){ try{ console.error('[installed_apps] overview sync error', _e && _e.message || _e); }catch(_){} }
