@@ -187,6 +187,7 @@ function toLocalSql(date = new Date()) {
 
 const baseCss = `
 #deployWrap{max-height:360px;overflow:auto}
+#btnCancelDeploy{display:none}
 #deployBox.pre{max-height:360px;overflow:auto}
 
 #ovFilter.btn {
@@ -674,6 +675,88 @@ small,.muted{color:var(--muted)}
 :root[data-theme="dark"] *::-webkit-scrollbar-thumb{background:#526881;border-radius:10px;border:2px solid #152437}
 :root[data-theme="dark"] *::-webkit-scrollbar-thumb:hover{background:#6c83a0}
 /* === fim tema escuro === */
+
+/* === Barra visual de andamento do deploy === */
+.deploy-progress-panel{
+  margin:8px 0 12px;
+  padding:10px 12px;
+  border:1px solid #d9e6ff;
+  border-radius:12px;
+  background:linear-gradient(180deg,#f8fbff 0%,#eef4ff 100%);
+  box-shadow:0 8px 22px rgba(99,102,241,.10)
+}
+.deploy-progress-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;font-size:13px;color:#334155}
+.deploy-progress-head strong{font-size:14px;color:#1e293b}
+.deploy-progress-track{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden;border:1px solid #d1d5db}
+.deploy-progress-track .bar{height:100%;width:0%;background:linear-gradient(90deg,#4f46e5,#22c55e);transition:width .35s ease,background .25s ease;border-radius:999px}
+.deploy-progress-panel.state-ok .deploy-progress-track .bar{background:linear-gradient(90deg,#16a34a,#22c55e)}
+.deploy-progress-panel.state-error .deploy-progress-track .bar{background:linear-gradient(90deg,#dc2626,#f97316)}
+:root[data-theme="dark"] .deploy-progress-panel{background:linear-gradient(180deg,#32465f 0%,#293b53 100%) !important;border-color:#566d86 !important;box-shadow:0 12px 30px rgba(0,0,0,.30) !important}
+:root[data-theme="dark"] .deploy-progress-head,
+:root[data-theme="dark"] .deploy-progress-head strong{color:#f3f7fb !important}
+:root[data-theme="dark"] .deploy-progress-track{background:#1f2937;border-color:#4b5563}
+/* === fim barra visual de andamento do deploy === */
+
+
+
+/* === Switch de tema claro/escuro (manual pelo usuário) === */
+.theme-toggle,
+.theme-toggle-login {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  flex-direction: row !important;
+  gap: 0 !important;
+  width: 84px !important;
+  min-width: 84px !important;
+  height: 34px !important;
+  padding: 4px 8px !important;
+  border-radius: 999px !important;
+  position: relative !important;
+  overflow: hidden !important;
+  cursor: pointer !important;
+  border: 1px solid #c7d2fe !important;
+  background: linear-gradient(135deg,#e0e7ff,#c7d2fe) !important;
+  color: #0f172a !important;
+  box-shadow: 0 8px 18px rgba(99,102,241,.16) !important;
+  transition: background .25s ease,border-color .25s ease,box-shadow .25s ease !important;
+}
+.theme-toggle span,
+.theme-toggle-login span {
+  position: relative !important;
+  z-index: 2 !important;
+  font-size: 14px !important;
+  line-height: 1 !important;
+  pointer-events: none !important;
+}
+.theme-toggle::before,
+.theme-toggle-login::before {
+  content: '' !important;
+  position: absolute !important;
+  z-index: 1 !important;
+  width: 26px !important;
+  height: 26px !important;
+  top: 3px !important;
+  left: 4px !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  box-shadow: 0 2px 7px rgba(15,23,42,.28) !important;
+  transition: left .25s ease, transform .25s ease !important;
+}
+:root[data-theme="dark"] .theme-toggle,
+:root[data-theme="dark"] .theme-toggle-login,
+body[data-theme="dark"] .theme-toggle-login {
+  background: linear-gradient(135deg,#0f172a,#1e293b) !important;
+  border-color: #334155 !important;
+  color: #f8fafc !important;
+}
+:root[data-theme="dark"] .theme-toggle::before,
+:root[data-theme="dark"] .theme-toggle-login::before,
+body[data-theme="dark"] .theme-toggle-login::before {
+  left: 52px !important;
+}
+.header .theme-toggle { margin-right: 6px !important; }
+/* === fim switch de tema === */
 `;
 /**
  * app.js — Deploy streaming, Ambientes, Auditorias
@@ -835,7 +918,7 @@ function runCmd(cmd, args = [], opts = {}) {
     child.on('error', (e) => {
       // Do not crash the process; surface the error in a controlled way
       const msg = (e && e.message) || String(e);
-      resolve({ code: -1, stdout: out, stderr: (err ? err + '\n' : '') + msg });
+      resolve({ code: -1, stdout: out, stderr: (err ? err + '\\n' : '') + msg });
     });
     child.on('close', code => resolve({ code, stdout: out, stderr: err }));
   });
@@ -1052,6 +1135,33 @@ try { await this.db.run(`UPDATE installed_apps SET env_key = lower(component) ||
 `);
     await this.db.run(`CREATE INDEX IF NOT EXISTS idx_env_name ON environments(name)`);
 try { await this.db.run(`ALTER TABLE environments ADD COLUMN stage TEXT`); } catch(_){ }
+
+    // === Multi-tenant / multi-cliente ===
+    await this.db.run(`CREATE TABLE IF NOT EXISTS tenants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      code TEXT UNIQUE,
+      active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    )`);
+    await this.db.run(`CREATE INDEX IF NOT EXISTS idx_tenants_name ON tenants(name)`);
+    try { await this.db.run(`ALTER TABLE environments ADD COLUMN tenant_id INTEGER`); } catch(_){ }
+    try { await this.db.run(`ALTER TABLE environments ADD COLUMN health_score INTEGER DEFAULT 0`); } catch(_){ }
+    try { await this.db.run(`ALTER TABLE environments ADD COLUMN health_status TEXT`); } catch(_){ }
+
+    await this.db.run(`CREATE TABLE IF NOT EXISTS environment_health_score (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      env_id INTEGER,
+      score INTEGER,
+      status TEXT,
+      outdated_count INTEGER DEFAULT 0,
+      dependency_issues INTEGER DEFAULT 0,
+      recent_errors INTEGER DEFAULT 0,
+      last_checked_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY(env_id) REFERENCES environments(id)
+    )`);
+    await this.db.run(`CREATE INDEX IF NOT EXISTS idx_env_health_env ON environment_health_score(env_id)`);
+
 
     // Auditoria de consulta de versão
     await this.db.run(`CREATE TABLE IF NOT EXISTS object_version_audit (
@@ -1818,8 +1928,11 @@ class LoginView {
       opacity:.95;
     }
     .footer strong{color:var(--primary)}
-    .theme-toggle-login{position:fixed;top:18px;right:18px;border:1px solid var(--line);background:#ffffff;color:var(--text);border-radius:12px;padding:10px 12px;font-weight:600;cursor:pointer;box-shadow:0 12px 28px rgba(15,23,42,.12)}
-    body[data-theme="dark"] .theme-toggle-login, :root[data-theme="dark"] .theme-toggle-login{background:#374151;color:#f3f4f6;border-color:#6b7280}
+    .theme-toggle-login{display:inline-flex!important;align-items:center!important;justify-content:space-between!important;flex-direction:row!important;width:84px!important;min-width:84px!important;height:34px!important;padding:4px 8px!important;border-radius:999px!important;position:fixed;top:18px;right:18px;overflow:hidden;border:1px solid #c7d2fe!important;background:linear-gradient(135deg,#e0e7ff,#c7d2fe)!important;color:#0f172a!important;cursor:pointer;box-shadow:0 12px 28px rgba(15,23,42,.12)!important;transition:all .25s ease!important}
+    .theme-toggle-login span{position:relative!important;z-index:2!important;font-size:14px!important;line-height:1!important;pointer-events:none!important}
+    .theme-toggle-login::before{content:''!important;position:absolute!important;z-index:1!important;width:26px!important;height:26px!important;top:3px!important;left:4px!important;border-radius:999px!important;background:#fff!important;box-shadow:0 2px 7px rgba(15,23,42,.28)!important;transition:left .25s ease!important}
+    body[data-theme="dark"] .theme-toggle-login, :root[data-theme="dark"] .theme-toggle-login{background:linear-gradient(135deg,#0f172a,#1e293b)!important;color:#f8fafc!important;border-color:#334155!important}
+    body[data-theme="dark"] .theme-toggle-login::before, :root[data-theme="dark"] .theme-toggle-login::before{left:52px!important}
     body[data-theme="dark"] .login-card, :root[data-theme="dark"] .login-card{background:#374151ee;border-color:#4b5563;color:#f3f4f6}
     body[data-theme="dark"] label, :root[data-theme="dark"] label,
     body[data-theme="dark"] .brand h1, :root[data-theme="dark"] .brand h1,
@@ -1837,7 +1950,7 @@ class LoginView {
   </style>
 </head>
 <body>
-  <button id="themeToggleLogin" class="theme-toggle-login" type="button">🌙 Tema escuro</button>
+  <button id="themeToggleLogin" class="theme-toggle-login" type="button" title="Alternar tema"><span>☀️</span><span>🌙</span></button>
   <main class="page">
     <section class="login-card">
       <div class="brand">
@@ -1996,7 +2109,7 @@ class LoginView {
       if (document.body) document.body.setAttribute('data-theme', next);
       updateThemeLogos(next);
       var btn = document.getElementById('themeToggleLogin');
-      if (btn) btn.textContent = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+      if (btn) { btn.innerHTML = '<span>☀️</span><span>🌙</span>'; btn.setAttribute('aria-pressed', String(next === 'dark')); btn.title = next === 'dark' ? 'Alternar para tema claro' : 'Alternar para tema escuro'; }
       try{ localStorage.setItem('theme', next); }catch(_){ }
     }
 
@@ -2236,7 +2349,7 @@ document.addEventListener('DOMContentLoaded', function(){
     var btn = document.getElementById('themeToggle');
     if (btn){
       btn.setAttribute('aria-pressed', String(next === 'dark'));
-      btn.textContent = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+      btn.innerHTML = '<span>☀️</span><span>🌙</span>';
       btn.title = next === 'dark' ? 'Alternar para tema claro' : 'Alternar para tema escuro';
     }
   }
@@ -2261,6 +2374,8 @@ document.addEventListener('DOMContentLoaded', function(){
         btn.type = 'button';
         btn.id = 'themeToggle';
         btn.className = 'btn theme-toggle';
+        btn.title = 'Alternar tema';
+        btn.innerHTML = '<span>☀️</span><span>🌙</span>';
         headerRight.insertBefore(btn, headerRight.firstChild || null);
       }
     }
@@ -3170,11 +3285,18 @@ document.addEventListener('DOMContentLoaded', function(){
 
     <div id="rightPane" class="sticky">
       <div class="card">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
           <strong>Deploy (tempo real)</strong>
           <span id="deployStatus" class="badge">parado</span>
+          <button id="btnCancelDeploy" class="btn warn" type="button" title="Cancela o processo XS/CF em execução">Cancelar deploy</button>
         </div>
-        <div class="progress" id="deployProgress" style="display:none"><div class="bar"></div></div>
+        <div id="deployProgress" class="deploy-progress-panel" style="display:none">
+          <div class="deploy-progress-head">
+            <span id="deployProgressLabel">Andamento do deploy</span>
+            <strong id="deployProgressPercent">0%</strong>
+          </div>
+          <div class="deploy-progress-track"><div class="bar"></div></div>
+        </div>
           <div id="deployWrap">
           <div id="deployBox" class="pre"></div>
         </div>
@@ -3202,6 +3324,120 @@ if (typeof window !== 'undefined'){
 
 var $$=function(s){return Array.prototype.slice.call(document.querySelectorAll(s))};
 var $id=function(i){return document.getElementById(i)};
+
+function clampDeployPercent(value){
+  var n = Number(value);
+  if(!Number.isFinite(n)) n = 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+function setDeployProgress(percent, label, state){
+  var p = clampDeployPercent(percent);
+  var wrap = document.getElementById('deployProgress');
+  if(wrap){
+    wrap.style.display = 'block';
+    wrap.classList.remove('state-ok','state-error');
+    if(state === 'ok') wrap.classList.add('state-ok');
+    if(state === 'error') wrap.classList.add('state-error');
+  }
+  var bar = wrap ? wrap.querySelector('.bar') : null;
+  if(bar) bar.style.width = p + '%';
+  var pct = document.getElementById('deployProgressPercent');
+  if(pct) pct.textContent = p + '%';
+  var lbl = document.getElementById('deployProgressLabel');
+  if(lbl && label) lbl.textContent = label;
+}
+var __deployProgressResetTimer = null;
+function clearDeployProgressResetTimer(){
+  if(__deployProgressResetTimer){
+    clearTimeout(__deployProgressResetTimer);
+    __deployProgressResetTimer = null;
+  }
+}
+function resetDeployProgress(label){
+  clearDeployProgressResetTimer();
+  var wrap = document.getElementById('deployProgress');
+  if(wrap) wrap.classList.remove('state-ok','state-error');
+  setDeployProgress(0, label || 'Andamento do deploy');
+}
+function scheduleDeployProgressReset(label, delayMs){
+  clearDeployProgressResetTimer();
+  __deployProgressResetTimer = setTimeout(function(){
+    var wrap = document.getElementById('deployProgress');
+    if(wrap) wrap.classList.remove('state-ok','state-error');
+    setDeployProgress(0, label || 'Aguardando novo deploy');
+    __deployProgressResetTimer = null;
+  }, Number(delayMs || 1200));
+}
+function finishDeployProgress(ok){
+  setDeployProgress(100, ok ? 'Deploy concluído com sucesso' : 'Deploy finalizado com erro', ok ? 'ok' : 'error');
+  scheduleDeployProgressReset(ok ? 'Pronto para novo deploy' : 'Pronto para nova tentativa', 1500);
+}
+function handleDeployProgressEvent(ev){
+  try{
+    var payload = JSON.parse(ev.data || '{}');
+    setDeployProgress(payload.percent, payload.message || payload.label || 'Andamento do deploy');
+  }catch(_e){}
+}
+
+var CURRENT_DEPLOY_ID = null;
+var CURRENT_DEPLOY_ES = null;
+var CURRENT_DEPLOY_CANCELLED = false;
+
+function setCancelDeployVisible(visible){
+  try{
+    var btn = document.getElementById('btnCancelDeploy');
+    if(btn){
+      btn.style.display = visible ? 'inline-flex' : 'none';
+      btn.disabled = false;
+      btn.textContent = 'Cancelar deploy';
+    }
+  }catch(_e){}
+}
+
+function handleDeployIdEvent(ev){
+  try{
+    var payload = JSON.parse(ev.data || '{}');
+    CURRENT_DEPLOY_ID = payload.deployId || null;
+    CURRENT_DEPLOY_CANCELLED = false;
+    setCancelDeployVisible(!!CURRENT_DEPLOY_ID);
+  }catch(_e){}
+}
+
+async function cancelCurrentDeploy(){
+  if(!CURRENT_DEPLOY_ID){
+    customAlert('Nenhum deploy em execução para cancelar.');
+    return;
+  }
+  var ok = true;
+  try{
+    if(typeof customConfirm === 'function'){
+      ok = await customConfirm('Deseja cancelar o deploy em execução?');
+    } else {
+      ok = window.confirm('Deseja cancelar o deploy em execução?');
+    }
+  }catch(_e){ ok = window.confirm('Deseja cancelar o deploy em execução?'); }
+  if(!ok) return;
+
+  var btn = document.getElementById('btnCancelDeploy');
+  if(btn){ btn.disabled = true; btn.textContent = 'Cancelando...'; }
+
+  try{
+    const rs = await fetch('/api/deploy-cancel/' + encodeURIComponent(CURRENT_DEPLOY_ID), { method:'POST' });
+    const js = await rs.json().catch(function(){ return {}; });
+    if(!rs.ok || !js.ok){
+      throw new Error(js.error || 'Falha ao cancelar deploy.');
+    }
+    CURRENT_DEPLOY_CANCELLED = true;
+    document.getElementById('deployStatus').textContent = 'cancelando';
+    setDeployProgress(99, 'Cancelamento solicitado', 'error');
+  }catch(e){
+    if(btn){ btn.disabled = false; btn.textContent = 'Cancelar deploy'; }
+    customAlert(e && e.message ? e.message : String(e));
+  }
+}
+
+on('btnCancelDeploy', 'click', cancelCurrentDeploy);
+
 /**
  * Função on
  * - O que faz: Encapsula uma operação específica do domínio.
@@ -4303,6 +4539,9 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
           if(box) box.textContent += '\\n\\n===== DEPLOY: ' + objectId + ' =====\\n';
 
           var es = new EventSource('/api/deploy-stream?token=' + encodeURIComponent(js.token));
+          CURRENT_DEPLOY_ES = es;
+          es.addEventListener('progress', handleDeployProgressEvent);
+          es.addEventListener('deploy-id', handleDeployIdEvent);
           es.onmessage = function(ev2){
             if (!box) return;
             box.textContent += (ev2.data||'') + '\\n';
@@ -4313,6 +4552,9 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
               var payload = JSON.parse(ev2.data||'{}');
               if(box) box.textContent += '\\n==> ' + (payload.ok ? 'Deploy OK: ' : 'Deploy ERRO: ') + objectId + '\\n';
               es.close();
+              setCancelDeployVisible(false);
+              CURRENT_DEPLOY_ID = null;
+              CURRENT_DEPLOY_ES = null;
               resolve({
                 ok: !!payload.ok,
                 payload: payload,
@@ -4324,7 +4566,7 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
               resolve({ok:false, error:'Falha ao interpretar retorno do deploy', canDownloadLog:true});
             }
           });
-          es.onerror = function(){ try{ es.close(); }catch(_){} resolve({ok:false, error:'Erro de stream do deploy', canDownloadLog:true}); };
+          es.onerror = function(){ try{ es.close(); }catch(_){} setCancelDeployVisible(false); CURRENT_DEPLOY_ID = null; CURRENT_DEPLOY_ES = null; resolve({ok:false, error:'Erro de stream do deploy', canDownloadLog:true}); };
         }catch(e){
           resolve({ok:false, error: e && e.message ? e.message : String(e), canDownloadLog:false});
         }
@@ -4365,11 +4607,13 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
           }
 
           setBulkMsg('Fila: ' + plan.order.length + ' item(ns). Iniciando...');
+          resetDeployProgress('Deploy em lote: 0/' + plan.order.length);
 
           var summary = { total: plan.order.length, success: [], failed: [], message: '' };
           for (var i=0;i<plan.order.length;i++){
             var obj = plan.order[i];
             setBulkMsg('Deploy ' + (i+1) + '/' + plan.order.length + ': ' + obj);
+            setDeployProgress(Math.round((i / plan.order.length) * 100), 'Deploy ' + (i+1) + '/' + plan.order.length + ' - ' + obj);
             var r = await runSingleDeploy(envId, obj, pwd, ticket);
             if(!r.ok){
               summary.failed.push({
@@ -4380,15 +4624,19 @@ try { __toggleProdOnlyButtons(__getSelectedEnvStage && __getSelectedEnvStage());
               setBulkMsg('Erro no deploy de ' + obj + '. Processo interrompido.');
               summary.message = 'Processo finalizado com erro após ' + summary.success.length + ' sucesso(s) e ' + summary.failed.length + ' falha(s).';
               updateBulkSummary({ready: summary.success.length, error: summary.failed.length});
+              setDeployProgress(Math.round(((i + 1) / plan.order.length) * 100), 'Erro no deploy ' + (i+1) + '/' + plan.order.length + ' - ' + obj, 'error');
+              scheduleDeployProgressReset('Pronto para nova tentativa', 1500);
               showBulkResultModal(summary);
               return;
             }
             summary.success.push(obj);
             updateBulkSummary({ready: summary.success.length, error: summary.failed.length});
+            setDeployProgress(Math.round(((i + 1) / plan.order.length) * 100), 'Concluído ' + (i + 1) + '/' + plan.order.length + ' - ' + obj);
           }
           window.__bulkDeployTodayCount = (window.__bulkDeployTodayCount || 0) + summary.success.length;
           summary.message = 'Alteração em massa concluída com sucesso para ' + summary.success.length + ' item(ns).';
           setBulkMsg('Deploy em lote concluído!');
+          finishDeployProgress(true);
           updateBulkSummary({ready: summary.success.length, error: summary.failed.length, today: window.__bulkDeployTodayCount});
           showBulkResultModal(summary);
           try{ document.getElementById('btnOverview').click(); }catch(_){}
@@ -4452,8 +4700,12 @@ let pwd = (typeof ENV_PASS !== 'undefined' && ENV_PASS) ? ENV_PASS : null;
           document.getElementById('deployWrap').style.display = 'block';
           document.getElementById('deployBox').textContent = '';
           document.getElementById('deployStatus').textContent = 'executando';
+          resetDeployProgress('Iniciando deploy');
 
           const es = new EventSource('/api/deploy-stream?token=' + encodeURIComponent(js.token));
+          CURRENT_DEPLOY_ES = es;
+          es.addEventListener('progress', handleDeployProgressEvent);
+          es.addEventListener('deploy-id', handleDeployIdEvent);
           es.onmessage = function(ev2){
             const box = document.getElementById('deployBox');
             box.textContent += ev2.data + '\\\\n';
@@ -4464,14 +4716,18 @@ let pwd = (typeof ENV_PASS !== 'undefined' && ENV_PASS) ? ENV_PASS : null;
             try{
               const payload = JSON.parse(ev2.data||'{}');
               document.getElementById('deployBox').textContent += '\\\\n==> ' + (payload.ok ? 'Deploy finalizado com sucesso.' : 'Deploy finalizado com erro.');
+              finishDeployProgress(!!payload.ok);
 
               customAlert(payload.ok ? 'Deploy concluído com sucesso.' : 'Deploy finalizado com erro. Verifique os logs.');
 }catch(_){}
             es.close();
+            setCancelDeployVisible(false);
+            CURRENT_DEPLOY_ID = null;
+            CURRENT_DEPLOY_ES = null;
             // auto-refresh overview
             document.getElementById('btnOverview').click();
           });
-          es.onerror = function(){ document.getElementById('deployStatus').textContent = 'erro'; es.close(); };
+          es.onerror = function(){ document.getElementById('deployStatus').textContent = CURRENT_DEPLOY_CANCELLED ? 'cancelado' : 'erro'; finishDeployProgress(false); setCancelDeployVisible(false); CURRENT_DEPLOY_ID = null; CURRENT_DEPLOY_ES = null; es.close(); };
         }catch(e){
           customAlert(e.message||e);
         }
@@ -4999,7 +5255,7 @@ if (!window.__depsListenerAdded){
     var btn = document.getElementById('themeToggle');
     if (btn){
       btn.setAttribute('aria-pressed', String(next === 'dark'));
-      btn.textContent = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+      btn.innerHTML = '<span>☀️</span><span>🌙</span>';
       btn.title = next === 'dark' ? 'Alternar para tema claro' : 'Alternar para tema escuro';
     }
   }
@@ -5024,6 +5280,8 @@ if (!window.__depsListenerAdded){
         btn.type = 'button';
         btn.id = 'themeToggle';
         btn.className = 'btn theme-toggle';
+        btn.title = 'Alternar tema';
+        btn.innerHTML = '<span>☀️</span><span>🌙</span>';
         headerRight.insertBefore(btn, headerRight.firstChild || null);
       }
     }
@@ -5575,7 +5833,7 @@ document.addEventListener('DOMContentLoaded', function(){
     var btn = document.getElementById('themeToggle');
     if (btn){
       btn.setAttribute('aria-pressed', String(next === 'dark'));
-      btn.textContent = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+      btn.innerHTML = '<span>☀️</span><span>🌙</span>';
       btn.title = next === 'dark' ? 'Alternar para tema claro' : 'Alternar para tema escuro';
     }
   }
@@ -5600,6 +5858,8 @@ document.addEventListener('DOMContentLoaded', function(){
         btn.type = 'button';
         btn.id = 'themeToggle';
         btn.className = 'btn theme-toggle';
+        btn.title = 'Alternar tema';
+        btn.innerHTML = '<span>☀️</span><span>🌙</span>';
         headerRight.insertBefore(btn, headerRight.firstChild || null);
       }
     }
@@ -6116,6 +6376,7 @@ catch(e){
     this.envSvc=envSvc;
     this.router=express.Router();
     this.deployTokens = new Map(); // token => {envId, objectId, password, user}
+    this.activeDeploys = new Map(); // deployId => { child, cancelled, startedAt, envId, objectId, user }
 
 
     this.rollbackTokens = new Map(); // token => {envId, objectId, password, user, targetVersion}
@@ -6133,6 +6394,7 @@ this.router.get('/api/update-apps', this.update.bind(this));
     this.router.post('/api/object-env-status', this.objectEnvStatus.bind(this));
     this.router.post('/api/deploy-start', this.deployStart.bind(this));
     this.router.get('/api/deploy-stream', this.deployStream.bind(this));
+    this.router.post('/api/deploy-cancel/:id', this.deployCancel.bind(this));
     this.router.post('/api/download-app-logs', this.downloadAppLogs.bind(this));
     // Rollback routes
     this.router.post('/api/rollback-start', this.rollbackStart.bind(this));
@@ -7023,6 +7285,41 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
       return res.status(500).json({ ok:false, error: e.message || String(e) });
     }
   }
+async deployCancel(req,res){
+  const deployId = String((req.params && req.params.id) || '').trim();
+  if (!deployId) return res.status(400).json({ ok:false, error:'ID do deploy não informado.' });
+
+  const deploy = this.activeDeploys && this.activeDeploys.get(deployId);
+  if (!deploy) return res.status(404).json({ ok:false, error:'Deploy não encontrado ou já finalizado.' });
+
+  try{
+    deploy.cancelled = true;
+    deploy.cancelRequestedAt = Date.now();
+
+    // Cancela também o download HTTP do MTAR, quando ainda não chegou no xs/cf deploy.
+    try{
+      if (deploy.abortController && typeof deploy.abortController.abort === 'function') {
+        deploy.abortController.abort();
+      }
+    }catch(_e){}
+
+    // Encerra o processo CLI atual, seja login xs/cf ou deploy xs/cf.
+    if (deploy.child && !deploy.child.killed) {
+      try{ deploy.child.kill('SIGTERM'); }catch(_e){}
+      setTimeout(() => {
+        try{
+          const d = this.activeDeploys && this.activeDeploys.get(deployId);
+          if (d && d.cancelled && d.child && !d.child.killed) d.child.kill('SIGKILL');
+        }catch(_e){}
+      }, Number(process.env.DEPLOY_CANCEL_FORCE_KILL_MS || 3000));
+    }
+
+    return res.json({ ok:true, deployId, message:'Cancelamento solicitado.' });
+  }catch(e){
+    return res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+  }
+}
+
 async deployStream(req,res){
   const token = String(req.query.token||'');
   const info = this.deployTokens.get(token);
@@ -7059,11 +7356,41 @@ async deployStream(req,res){
   };
   const sendDone = (payload) => {
     try{
+      if (typeof deployId !== 'undefined' && this.activeDeploys) this.activeDeploys.delete(deployId);
+    }catch(_e){}
+    try{
       res.write('event: done\n');
       res.write('data: ' + JSON.stringify(payload) + '\n\n');
     }catch(_){}
   };
+  const sendProgress = (percent, message) => {
+    try{
+      res.write('event: progress\n');
+      res.write('data: ' + JSON.stringify({ percent: Math.max(0, Math.min(100, Math.round(Number(percent)||0))), message: message || 'Andamento do deploy' }) + '\n\n');
+    }catch(_){}
+  };
+  const sendEvent = (eventName, payload) => {
+    try{
+      res.write('event: ' + String(eventName) + '\n');
+      res.write('data: ' + JSON.stringify(payload || {}) + '\n\n');
+    }catch(_){}
+  };
+  sendProgress(2, 'Preparando deploy');
   const { envId, objectId, password, user, ticket, forceVersionFromHml, hmlVersionForObject } = info;
+  const deployId = uuidv4();
+  const deployState = { child:null, abortController:null, cancelled:false, startedAt:Date.now(), envId, objectId, user };
+  this.activeDeploys.set(deployId, deployState);
+  sendEvent('deploy-id', { deployId });
+
+  const isDeployCancelled = () => !!(deployState && deployState.cancelled);
+  const stopIfCancelled = (message) => {
+    if (!isDeployCancelled()) return false;
+    sendProgress(100, 'Deploy cancelado');
+    send(message || 'Deploy cancelado pelo usuário.');
+    sendDone({ ok:false, cancelled:true, error:'Deploy cancelado pelo usuário.' });
+    try{ res.end(); }catch(_e){}
+    return true;
+  };
 
   try {
     // 1) Buscar ambiente
@@ -7083,6 +7410,7 @@ async deployStream(req,res){
       sendDone({ ok:false });
       return res.end();
     }
+    sendProgress(10, 'Ambiente validado');
 
     // 2) Definir CLI
     const rawType = (env && typeof env.env_type === 'string' ? env.env_type : '').trim().toUpperCase();
@@ -7101,24 +7429,34 @@ async deployStream(req,res){
     // - no deploy a senha deve ir SEM aspas literais
     // - para evitar interpretação de caracteres especiais pelo shell, usamos spawn com shell:false
     const runSpawn = (cmd, args=[], opts={}) => new Promise((resolve) => {
+      if (isDeployCancelled()) return resolve({ code:-999, stdout:'', stderr:'Deploy cancelado pelo usuário.' });
       const child = spawnSafe(cmd, args, { env: (opts && opts.env) ? opts.env : process.env, ...opts });
+      deployState.child = child;
+      this.activeDeploys.set(deployId, deployState);
       let out = '', err = '';
       child.stdout.on('data', d => { const s = String(d); out += s; send(s.trimEnd()); });
       child.stderr.on('data', d => { const s = String(d); err += s; send(s.trimEnd()); });
-      child.on('error', e => resolve({ code:-1, stdout: out, stderr: (err ? err + '\n' : '') + ((e && e.message) || String(e)) }));
-      child.on('close', code => resolve({ code, stdout: out, stderr: err }));
+      child.on('error', e => resolve({ code:-1, stdout: out, stderr: (err ? err + '\\n' : '') + ((e && e.message) || String(e)) }));
+      child.on('close', code => {
+        if (deployState.child === child) deployState.child = null;
+        resolve({ code: isDeployCancelled() ? -999 : code, stdout: out, stderr: err });
+      });
     });
 
     const loginArgs = ['login','-a',env.org_url,'--skip-ssl-validation','-u',env.username,'-p', ensureCliPasswordRawForDeploy(password)];
     if (env.org)   loginArgs.push('-o', ensureCliSpawnRaw(env.org));
     if (env.space) loginArgs.push('-s', ensureCliSpawnRaw(env.space));
+    sendProgress(15, 'Realizando login no ambiente');
     send('> ' + CLI_BIN + ' ' + loginArgs.map((v,i)=> loginArgs[i-1]==='-p' ? '********' : v).join(' '));
     const sLogin = await runSpawn(CLI_BIN, loginArgs);
+    if (stopIfCancelled('Deploy cancelado durante o login no ambiente.')) return;
     if (sLogin.code !== 0) {
+      sendProgress(100, 'Falha no login');
       send((sLogin.stderr || sLogin.stdout || 'Falha no login').slice(0,2000));
       sendDone({ ok:false });
       return res.end();
     }
+    sendProgress(25, 'Login realizado');
 
     // 4) Descobrir versão a usar
     let repoVersion = null;
@@ -7232,10 +7570,13 @@ async deployStream(req,res){
     }
 
     if (!repoVersion) {
+      sendProgress(100, 'Versão não encontrada');
       send('Não encontrei versão do objeto para continuar.');
       sendDone({ ok:false });
       return res.end();
     }
+    sendProgress(40, 'Versão resolvida: ' + repoVersion);
+    if (stopIfCancelled('Deploy cancelado antes do download do MTAR.')) return;
 
     // 5) Baixar MTAR (com cache local: mtars/ e mtars_old/)
     const path = require('path');
@@ -7272,29 +7613,104 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'apps.db');
     let mtarFileToDeploy = null;
     if (fs.existsSync(outFile)) {
       mtarFileToDeploy = outFile;
+      sendProgress(55, 'MTAR localizado em cache');
       send('MTAR já existe em cache (mtars). Não será baixado novamente.');
       send('Arquivo local: ' + mtarFileToDeploy);
     } else if (fs.existsSync(oldOutFile)) {
       mtarFileToDeploy = oldOutFile;
+      sendProgress(55, 'MTAR localizado em cache antigo');
       send('MTAR já existe em cache (mtars_old). Não será baixado novamente.');
       send('Arquivo local: ' + mtarFileToDeploy);
     } else {
       const url = await this.appsSvc.resolveMtarUrl(objectId, repoVersion, { preferredFolder: (info && info.packageSource) ? info.packageSource : 'normal' }, (t)=>send(t));
+      sendProgress(50, 'Baixando MTAR');
       send('Baixando MTAR: ' + url);
 
-      const response = await axios.get(url, { responseType: 'stream', timeout: 600000 });
+      deployState.abortController = new AbortController();
+      const response = await axios.get(url, { responseType: 'stream', timeout: 600000, signal: deployState.abortController.signal });
       await new Promise((ok, bad)=>{
         const writer = fs.createWriteStream(outFile);
-        response.data.pipe(writer);
+        let downloaded = 0;
+        const total = Number((response.headers && response.headers['content-length']) || 0);
+        response.data.on('data', chunk => {
+          downloaded += chunk.length || 0;
+          if (isDeployCancelled()) {
+            try{ response.data.destroy(new Error('Deploy cancelado pelo usuário.')); }catch(_e){}
+            try{ writer.destroy(new Error('Deploy cancelado pelo usuário.')); }catch(_e){}
+            return;
+          }
+          if (total > 0) {
+            const pct = 50 + Math.min(15, Math.floor((downloaded / total) * 15));
+            sendProgress(pct, 'Baixando MTAR');
+          }
+        });
+        response.data.on('error', bad);
         writer.on('finish', ok);
         writer.on('error', bad);
+        response.data.pipe(writer);
       });
+      deployState.abortController = null;
+      if (stopIfCancelled('Deploy cancelado durante o download do MTAR.')) return;
       mtarFileToDeploy = outFile;
+      sendProgress(65, 'MTAR baixado');
       send('Arquivo salvo em: ' + outFile);
     }
 
+    if (stopIfCancelled('Deploy cancelado antes de iniciar o processo XS/CF.')) return;
+
 // 6) Deploy
+sendProgress(70, 'Iniciando deploy');
 send('Iniciando deploy...');
+
+// Progresso dinâmico do deploy baseado nos logs reais do XS/CF.
+// O download usa até ~65%; o deploy evolui de 70% até 99% conforme stdout/stderr.
+let deployProgress = 70;
+let deployProgressTimer = null;
+let deployLastMessage = 'Executando deploy';
+
+function smoothDeployProgress(target, message) {
+  target = Math.max(deployProgress, Math.min(99, Number(target) || deployProgress));
+  deployLastMessage = message || deployLastMessage || 'Executando deploy';
+
+  if (deployProgressTimer) clearInterval(deployProgressTimer);
+
+  deployProgressTimer = setInterval(() => {
+    if (deployProgress >= target) {
+      clearInterval(deployProgressTimer);
+      deployProgressTimer = null;
+      return;
+    }
+
+    deployProgress += 1;
+    sendProgress(deployProgress, deployLastMessage);
+  }, Number(process.env.DEPLOY_PROGRESS_INTERVAL_MS || 250));
+}
+
+function updateDeployProgressFromLog(text) {
+  const t = String(text || '');
+  if (!t.trim()) return;
+
+  const steps = [
+    { re: /uploading|upload|uploading content|uploading application/i, percent: 72, msg: 'Enviando MTAR para o ambiente' },
+    { re: /creating service|create service|updating service|processing service|service instance|service key|destination service|optional service/i, percent: 76, msg: 'Processando serviços e service keys' },
+    { re: /bind|binding|could not bind/i, percent: 82, msg: 'Realizando bind de serviços' },
+    { re: /stopping application|stopping/i, percent: 84, msg: 'Parando aplicação anterior' },
+    { re: /staging application|staging|application .* staged/i, percent: 88, msg: 'Realizando staging da aplicação' },
+    { re: /starting application|starting/i, percent: 94, msg: 'Iniciando aplicação' },
+    { re: /started and available|available at|application .* started/i, percent: 99, msg: 'Aplicação iniciada' }
+  ];
+
+  for (const step of steps) {
+    if (step.re.test(t)) {
+      smoothDeployProgress(step.percent, step.msg);
+      break;
+    }
+  }
+
+  if (/error|failed|not found|could not|cannot|exception|unexpected/i.test(t)) {
+    sendProgress(deployProgress, 'Atenção: ocorrência identificada no deploy');
+  }
+}
 
 const __mta = withMtaUploadTweaks(
   mtarFileToDeploy,
@@ -7315,10 +7731,21 @@ const retryDelaySec = Number(process.env.XS_DEPLOY_HTTP_RETRY_DELAY_SEC || 10);
 const runDeploy = (attempt) => {
   let sawHttpCommError = false;
 
+  if (deployState.cancelled) {
+    sendProgress(100, 'Deploy cancelado');
+    send('Deploy cancelado antes de iniciar o processo.');
+    sendDone({ ok:false, cancelled:true, error:'Deploy cancelado pelo usuário.' });
+    return;
+  }
+
   const child = spawnSafe(resolveSpawnCommand(CLI_BIN), __mta.args, { env: __mta.env });
+  deployState.child = child;
+  deployState.attempt = attempt;
+  this.activeDeploys.set(deployId, deployState);
 
   child.stdout.on('data', d => {
     const t = d.toString();
+    updateDeployProgressFromLog(t);
     send(t);
   });
 
@@ -7327,10 +7754,39 @@ const runDeploy = (attempt) => {
     if (!__isCFDeploy && /Error\s+occured\s+during\s+communication\s+with\s+HTTP\s+server/i.test(t)) {
       sawHttpCommError = true;
     }
+    updateDeployProgressFromLog(t);
     send(t);
   });
 
   child.on('close', async code => {
+    if (deployState.child === child) deployState.child = null;
+    if (deployProgressTimer) {
+      clearInterval(deployProgressTimer);
+      deployProgressTimer = null;
+    }
+    if (deployState.cancelled) {
+      sendProgress(100, 'Deploy cancelado');
+      send('Deploy cancelado pelo usuário. O processo XS/CF foi encerrado.');
+      try {
+        const userName = user || (req.session && req.session.user && req.session.user.username) || null;
+        await this.__auditInsert(req, {
+          env_id: (env && env.id) || envId || null,
+          company_name: (env && (env.name || env.company_name || env.org)) || null,
+          org: (env && env.org) || null,
+          space: (env && env.space) || null,
+          object_id: objectId,
+          prev_version: null,
+          new_version: repoVersion,
+          executor_user: userName,
+          ticket: (ticket == null ? null : String(ticket)),
+          status: 'cancelled',
+          log_text: __deployLogBuf
+        });
+      } catch(_e) {}
+      sendDone({ ok:false, cancelled:true, error:'Deploy cancelado pelo usuário.' });
+      return res.end();
+    }
+    sendProgress(100, code === 0 ? 'Deploy concluído' : 'Deploy finalizado com erro');
     // If this is XS, and we saw the HTTP communication error, retry a few times.
     if (!__isCFDeploy && sawHttpCommError && attempt < maxRetries) {
       send(`WARN    Comunicação HTTP instável durante o upload. Tentando novamente em ${retryDelaySec} segundos... (tentativa ${attempt + 1}/${maxRetries})`);
@@ -7406,7 +7862,14 @@ const runDeploy = (attempt) => {
 runDeploy(0);
 
   } catch (e) {
+    if (typeof isDeployCancelled === 'function' && isDeployCancelled()) {
+      try{ sendProgress(100, 'Deploy cancelado'); }catch(_e2){}
+      send('Deploy cancelado pelo usuário.');
+      sendDone({ ok:false, cancelled:true, error:'Deploy cancelado pelo usuário.' });
+      return res.end();
+    }
     const _msg = 'Erro no deploy: ' + (e && e.message ? e.message : String(e));
+    try{ sendProgress(100, 'Erro no deploy'); }catch(_e2){}
     send(_msg);
     sendDone({ ok:false, error: (e && e.message) ? e.message : String(e) });
     return res.end();
@@ -7524,7 +7987,7 @@ async rollbackLive(req,res){
     var btn = document.getElementById('themeToggle');
     if (btn){
       btn.setAttribute('aria-pressed', String(next === 'dark'));
-      btn.textContent = next === 'dark' ? '☀️ Tema claro' : '🌙 Tema escuro';
+      btn.innerHTML = '<span>☀️</span><span>🌙</span>';
       btn.title = next === 'dark' ? 'Alternar para tema claro' : 'Alternar para tema escuro';
     }
   }
@@ -7549,6 +8012,8 @@ async rollbackLive(req,res){
         btn.type = 'button';
         btn.id = 'themeToggle';
         btn.className = 'btn theme-toggle';
+        btn.title = 'Alternar tema';
+        btn.innerHTML = '<span>☀️</span><span>🌙</span>';
         headerRight.insertBefore(btn, headerRight.firstChild || null);
       }
     }
@@ -8382,6 +8847,294 @@ this.app.use(this.auth.router);
     this.app.use(this.envs.router);
 
     this.app.get('/reset/:token', this.auth.renderReset.bind(this.auth));
+
+
+    // ===================== Dashboard Executivo / Multi-tenant / Health Score =====================
+    this.app.get('/api/dashboard/summary', async (req, res) => {
+      try {
+        const tenants = await this.db.get(`SELECT COUNT(*) AS n FROM tenants WHERE ifnull(active,1)=1`);
+        const envs = await this.db.get(`SELECT COUNT(*) AS n FROM environments`);
+        const deploysToday = await this.db.get(`
+          SELECT COUNT(*) AS n
+          FROM deploy_audit
+          WHERE date(ts) = date('now','localtime')
+        `);
+
+        const deployTotal = await this.db.get(`SELECT COUNT(*) AS n FROM deploy_audit`);
+        const deployOk = await this.db.get(`
+          SELECT COUNT(*) AS n
+          FROM deploy_audit
+          WHERE lower(ifnull(status,'')) IN ('success','sucesso','ok','completed','concluido','concluído')
+             OR lower(ifnull(status,'')) LIKE '%success%'
+             OR lower(ifnull(status,'')) LIKE '%sucesso%'
+             OR lower(ifnull(status,'')) LIKE '%conclu%'
+        `);
+
+        const total = Number(deployTotal?.n || 0);
+        const ok = Number(deployOk?.n || 0);
+        const successRate = total > 0 ? Math.round((ok / total) * 100) : 0;
+
+        const recentErrors = await this.db.get(`
+          SELECT COUNT(*) AS n
+          FROM deploy_audit
+          WHERE datetime(ts) >= datetime('now','localtime','-7 days')
+            AND (
+              lower(ifnull(status,'')) LIKE '%erro%'
+              OR lower(ifnull(status,'')) LIKE '%error%'
+              OR lower(ifnull(status,'')) LIKE '%fail%'
+              OR lower(ifnull(status,'')) LIKE '%failed%'
+            )
+        `);
+
+        res.json({
+          ok: true,
+          clientes: Number(tenants?.n || 0),
+          ambientes: Number(envs?.n || 0),
+          deploysHoje: Number(deploysToday?.n || 0),
+          taxaSucesso: successRate,
+          erros7Dias: Number(recentErrors?.n || 0)
+        });
+      } catch (e) {
+        res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    this.app.get('/api/dashboard/health-score', async (req, res) => {
+      try {
+        const rows = await this.db.all(`
+          SELECT
+            e.id,
+            e.name,
+            e.stage,
+            e.org,
+            e.space,
+            e.org_url,
+            COALESCE(h.score, e.health_score, 0) AS score,
+            COALESCE(h.status, e.health_status, 'Não calculado') AS status,
+            COALESCE(h.outdated_count, 0) AS outdated_count,
+            COALESCE(h.dependency_issues, 0) AS dependency_issues,
+            COALESCE(h.recent_errors, 0) AS recent_errors,
+            h.last_checked_at
+          FROM environments e
+          LEFT JOIN (
+            SELECT h1.*
+            FROM environment_health_score h1
+            INNER JOIN (
+              SELECT env_id, MAX(id) AS max_id
+              FROM environment_health_score
+              GROUP BY env_id
+            ) hx ON hx.max_id = h1.id
+          ) h ON h.env_id = e.id
+          ORDER BY e.name COLLATE NOCASE
+        `);
+        res.json({ ok:true, items: rows });
+      } catch (e) {
+        res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    this.app.post('/api/dashboard/recalculate-health', async (req, res) => {
+      try {
+        const envs = await this.db.all(`SELECT * FROM environments ORDER BY name`);
+        const results = [];
+
+        for (const env of envs) {
+          const recentErrors = await this.db.get(`
+            SELECT COUNT(*) AS n
+            FROM deploy_audit
+            WHERE env_id = ?
+              AND datetime(ts) >= datetime('now','localtime','-7 days')
+              AND (
+                lower(ifnull(status,'')) LIKE '%erro%'
+                OR lower(ifnull(status,'')) LIKE '%error%'
+                OR lower(ifnull(status,'')) LIKE '%fail%'
+                OR lower(ifnull(status,'')) LIKE '%failed%'
+              )
+          `, [env.id]);
+
+          const lastDeploy = await this.db.get(`
+            SELECT status
+            FROM deploy_audit
+            WHERE env_id = ?
+            ORDER BY ts DESC, id DESC
+            LIMIT 1
+          `, [env.id]);
+
+          let score = 100;
+          const errors = Number(recentErrors?.n || 0);
+          score -= Math.min(errors * 12, 48);
+
+          const lastStatus = String(lastDeploy?.status || '').toLowerCase();
+          if (lastStatus && (
+              lastStatus.includes('erro') ||
+              lastStatus.includes('error') ||
+              lastStatus.includes('fail')
+          )) {
+            score -= 20;
+          }
+
+          if (!env.org_url || !env.org || !env.space) score -= 10;
+
+          score = Math.max(0, Math.min(100, score));
+          const status = score >= 85 ? 'Saudável' : (score >= 70 ? 'Atenção' : 'Crítico');
+
+          await this.db.run(`
+            INSERT INTO environment_health_score
+              (env_id, score, status, outdated_count, dependency_issues, recent_errors, last_checked_at)
+            VALUES (?, ?, ?, 0, 0, ?, datetime('now','localtime'))
+          `, [env.id, score, status, errors]);
+
+          try {
+            await this.db.run(`UPDATE environments SET health_score=?, health_status=? WHERE id=?`, [score, status, env.id]);
+          } catch (_) {}
+
+          results.push({ env_id: env.id, name: env.name, score, status, recent_errors: errors });
+        }
+
+        res.json({ ok:true, items: results });
+      } catch (e) {
+        res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    this.app.get('/api/tenants', async (req, res) => {
+      try {
+        const rows = await this.db.all(`
+          SELECT
+            t.*,
+            (SELECT COUNT(*) FROM environments e WHERE e.tenant_id = t.id) AS environments_count
+          FROM tenants t
+          ORDER BY t.name COLLATE NOCASE
+        `);
+        res.json({ ok:true, items: rows });
+      } catch (e) {
+        res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    this.app.post('/api/tenants', async (req, res) => {
+      try {
+        const name = String(req.body?.name || '').trim();
+        const codeRaw = String(req.body?.code || name).trim();
+        const code = codeRaw
+          .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+          .replace(/[^a-zA-Z0-9_-]+/g,'_')
+          .replace(/^_+|_+$/g,'')
+          .toUpperCase();
+
+        if (!name) return res.status(400).json({ ok:false, error:'Informe o nome do cliente.' });
+
+        await this.db.run(`
+          INSERT INTO tenants (name, code, active, created_at)
+          VALUES (?, ?, 1, datetime('now','localtime'))
+        `, [name, code || null]);
+
+        const row = await this.db.get(`SELECT * FROM tenants WHERE id = last_insert_rowid()`);
+        res.json({ ok:true, item: row });
+      } catch (e) {
+        res.status(500).json({ ok:false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    this.app.get('/dashboard', async (req, res) => {
+      res.send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard Executivo</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f6f8fb;margin:0;color:#0f172a}
+    .wrap{max-width:1200px;margin:24px auto;padding:0 18px}
+    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+    .grid{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:12px}
+    .card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;box-shadow:0 10px 24px rgba(15,23,42,.06)}
+    .label{font-size:12px;color:#64748b;text-transform:uppercase;font-weight:700}
+    .num{font-size:28px;font-weight:800;margin-top:6px}
+    .section{margin-top:18px}
+    table{width:100%;border-collapse:collapse;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #e2e8f0}
+    th,td{padding:10px 12px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:14px}
+    th{background:#f8fafc;color:#475569}
+    .scorebar{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}
+    .scorebar span{display:block;height:100%;background:linear-gradient(90deg,#ef4444,#f59e0b,#22c55e)}
+    .btn{display:inline-flex;align-items:center;gap:8px;border:1px solid #c7d2fe;background:linear-gradient(135deg,#fff,#eef2ff);border-radius:10px;padding:8px 12px;color:#1e293b;text-decoration:none;cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>Dashboard Executivo</h1>
+        <div style="color:#64748b">Visão consolidada de clientes, ambientes, deploys e saúde operacional.</div>
+      </div>
+      <div>
+        <a class="btn" href="/">Voltar</a>
+        <button class="btn" onclick="recalc()">Recalcular Health Score</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><div class="label">Clientes</div><div class="num" id="clientes">-</div></div>
+      <div class="card"><div class="label">Ambientes</div><div class="num" id="ambientes">-</div></div>
+      <div class="card"><div class="label">Deploys hoje</div><div class="num" id="deploysHoje">-</div></div>
+      <div class="card"><div class="label">Taxa de sucesso</div><div class="num" id="taxaSucesso">-</div></div>
+      <div class="card"><div class="label">Erros 7 dias</div><div class="num" id="erros7Dias">-</div></div>
+    </div>
+
+    <div class="section card">
+      <h2>Score de Saúde por Ambiente</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Ambiente</th>
+            <th>Stage</th>
+            <th>Org / Space</th>
+            <th>Status</th>
+            <th>Score</th>
+          </tr>
+        </thead>
+        <tbody id="healthRows">
+          <tr><td colspan="5">Carregando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+async function load(){
+  const s = await fetch('/api/dashboard/summary').then(r=>r.json());
+  document.getElementById('clientes').innerText = s.clientes ?? 0;
+  document.getElementById('ambientes').innerText = s.ambientes ?? 0;
+  document.getElementById('deploysHoje').innerText = s.deploysHoje ?? 0;
+  document.getElementById('taxaSucesso').innerText = (s.taxaSucesso ?? 0) + '%';
+  document.getElementById('erros7Dias').innerText = s.erros7Dias ?? 0;
+
+  const h = await fetch('/api/dashboard/health-score').then(r=>r.json());
+  const rows = (h.items || []);
+  document.getElementById('healthRows').innerHTML = rows.length ? rows.map(x => {
+    const score = Number(x.score || 0);
+    return '<tr>' +
+      '<td><strong>' + escapeHtml(x.name || '-') + '</strong></td>' +
+      '<td>' + escapeHtml(x.stage || '-') + '</td>' +
+      '<td>' + escapeHtml((x.org || '-') + ' / ' + (x.space || '-')) + '</td>' +
+      '<td>' + escapeHtml(x.status || 'Não calculado') + '</td>' +
+      '<td><div style="display:flex;gap:10px;align-items:center"><div class="scorebar" style="flex:1"><span style="width:' + score + '%"></span></div><strong>' + score + '%</strong></div></td>' +
+    '</tr>';
+  }).join('') : '<tr><td colspan="5">Nenhum ambiente cadastrado.</td></tr>';
+}
+async function recalc(){
+  await fetch('/api/dashboard/recalculate-health', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  await load();
+}
+function escapeHtml(v){
+  return String(v ?? '').replace(/[&<>"']/g, function(m){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]); });
+}
+load();
+</script>
+</body>
+</html>`);
+    });
+    // ===================== fim Dashboard Executivo =====================
+
 
     this.app.use((req,res)=>res.status(404).send('Não encontrado'));
   }
