@@ -1460,10 +1460,34 @@ class AppsService {
     return Array.from(S).filter(Boolean).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
   }
   async latestRepoVersionMap(){
-    // Mapa id -> versão do repositório (tabela available_apps)
+    // Mapa id -> versão do repositório conforme metadata (Dependency.json / available_apps).
+    // Mantido para compatibilidade e para consultas rápidas sem validação física do MTAR.
     const rows = await this.db.all(`SELECT app_name AS id, version FROM available_apps WHERE version IS NOT NULL`);
     const map = {};
     for (const r of rows) { map[r.id] = r.version; }
+    return map;
+  }
+  async latestValidatedRepoVersionMap(opts = {}){
+    // Mapa id -> maior versão do Dependency.json que possui MTAR físico válido no repositório.
+    // IMPORTANTE: não validar o catálogo inteiro no overview, pois isso faz centenas de HEAD/GET e pode travar a tela.
+    // Quando opts.ids for informado, valida somente os componentes realmente encontrados/exibidos no ambiente.
+    const explicitIds = Array.isArray(opts && opts.ids) ? opts.ids : null;
+    const ids = explicitIds && explicitIds.length ? Array.from(new Set(explicitIds.map(x => String(x || '').trim()).filter(Boolean))) : await this.listAppIds();
+    const map = {};
+    const concurrency = Number(process.env.MTAR_VALIDATE_CONCURRENCY || 3);
+    let idx = 0;
+    const worker = async () => {
+      while (idx < ids.length) {
+        const id = ids[idx++];
+        try {
+          const v = await this.latestAvailableMtarVersionFor(id, opts);
+          if (v) map[id] = v;
+        } catch(_e) {
+          // Sem MTAR válido para este componente; mantém ausente para permitir fallback para metadata.
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, ids.length || 1)) }, worker));
     return map;
   }
   async latestVersionFor(id){
@@ -1506,6 +1530,46 @@ class AppsService {
     const vs = await this.versionsFor(id);
     return vs.length ? vs[vs.length-1] : null;
   }
+  async latestAvailableMtarVersionFor(id, opts = {}, onLog){
+    // Retorna a maior versão presente no Dependency.json que também existe fisicamente no repositório MTAR.
+    // Isso evita exibir/deployar versões publicadas no metadata, mas ainda sem artifact .mtar disponível.
+    const normalizedId = String(id || '').trim();
+    const pref = String((opts && opts.preferredFolder) || 'normal').toLowerCase() === 'unshipped' ? 'unshipped' : 'normal';
+    const envHint = String(this.envTypeHint || '').toUpperCase();
+    const cacheKey = `${normalizedId}|${pref}|${envHint}`;
+    const now = Date.now();
+    const ttl = Number(process.env.MTAR_VALIDATION_CACHE_TTL_MS || 300000);
+
+    if (!this.mtarValidationCache) this.mtarValidationCache = new Map();
+    const cached = this.mtarValidationCache.get(cacheKey);
+    if (cached && (now - cached.at) < ttl) return cached.version || null;
+
+    const versions = await this.versionsFor(normalizedId);
+    const ordered = Array.from(new Set(versions.map(v => String(v || '').trim()).filter(Boolean)))
+      .sort((a,b)=>b.localeCompare(a, undefined, { numeric:true }));
+
+    const log = (t)=>{ try{ onLog && onLog(t); }catch(_){} };
+    for (const version of ordered){
+      try{
+        await this.resolveMtarUrl(normalizedId, version, { preferredFolder: pref }, (t)=>{
+          // Log detalhado somente se o chamador solicitar explicitamente.
+          if (opts && opts.verboseValidationLog) log(t);
+        });
+        this.mtarValidationCache.set(cacheKey, { version, at: now });
+        return version;
+      }catch(_e){
+        log(`Versão ${version} existe no Dependency.json, mas não possui MTAR válido no repositório.`);
+      }
+    }
+
+    this.mtarValidationCache.set(cacheKey, { version: null, at: now });
+    return null;
+  }
+  async latestDependencyVersionFor(id){
+    // Alias explícito para quando for necessário consultar somente a versão do Dependency.json.
+    return this.latestVersionFor(id);
+  }
+
   async getRepoNameFor(id){
     const row = await this.db.get(`SELECT repoName FROM available_apps WHERE app_name = ? LIMIT 1`, [id]);
     return (row && row.repoName) ? row.repoName : null;
@@ -2552,7 +2616,7 @@ document.addEventListener('DOMContentLoaded', function(){
   <b></b>
 </footer>
 <footer style="position:fixed; bottom:0; left:0; right:0; background:#f1f1f1; border-top:1px solid #ccc; text-align:center; padding:8px; font-size:13px; color:#555; font-family: Calibri, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V4.0</b>
+  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V5.0</b>
 </footer>
 </body></html>`;
   }
@@ -2603,7 +2667,7 @@ this.router.get('/2fa', (req,res)=>{
   <b></b>
 </footer>
 <footer style="position:fixed; bottom:0; left:0; right:0; background:#f1f1f1; border-top:1px solid #ccc; text-align:center; padding:8px; font-size:13px; color:#555; font-family: Calibri, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V4.0</b>
+  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V5.0</b>
 </footer>
 </body></html>`;
   res.type('html').send(html);
@@ -5461,7 +5525,7 @@ if (!window.__depsListenerAdded){
   <b></b>
 </footer>
 <footer style="position:fixed; bottom:0; left:0; right:0; background:#f1f1f1; border-top:1px solid #ccc; text-align:center; padding:8px; font-size:13px; color:#555; font-family: Calibri, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V4.0</b>
+  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V5.0</b>
 </footer>
 </body></html>`;
   }
@@ -6039,7 +6103,7 @@ document.addEventListener('DOMContentLoaded', function(){
   <b></b>
 </footer>
 <footer style="position:fixed; bottom:0; left:0; right:0; background:#f1f1f1; border-top:1px solid #ccc; text-align:center; padding:8px; font-size:13px; color:#555; font-family: Calibri, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V4.0</b>
+  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V5.0</b>
 </footer>
 </body></html>`;
   }
@@ -6455,7 +6519,7 @@ try{ const n=await this.appsSvc.updateFromRemote(); res.json({ok:true,updated:n}
 
   async overview(req,res){
     try{
-      const { envId, password } = req.body || {};
+      const { envId, password, packageSource } = req.body || {};
       if(!envId) return res.status(400).json({ ok:false, error:'Informe envId.' });
       if(!password) return res.status(400).json({ ok:false, error:'Informe a senha.' });
 
@@ -6540,8 +6604,24 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
         const v = extractClientVersionFromLines(mtasLines, id);
         if (v) envMap[id] = v;
       }
-      // Mapa do repositório (base Thomson / available_apps)
-      const repoMapDefault = await this.appsSvc.latestRepoVersionMap();
+      // Mapa do repositório:
+      // 1) Carrega rapidamente a versão do Dependency.json para não bloquear o overview.
+      // 2) Valida fisicamente o MTAR somente para os componentes encontrados no ambiente atual.
+      // 3) Se a validação não encontrar artifact, mantém a versão do Dependency.json como fallback visual.
+      const selectedMtarSource = (String(packageSource || 'normal').toLowerCase() === 'unshipped') ? 'unshipped' : 'normal';
+      try { this.appsSvc.envTypeHint = (CLI_NAME === 'cf' || CLI_BIN === 'cf') ? 'CF' : 'XS'; } catch(_e) {}
+      const repoMapMetadata = await this.appsSvc.latestRepoVersionMap();
+      const installedIds = Object.keys(envMap || {});
+      let repoMapValidated = {};
+      try {
+        repoMapValidated = await this.appsSvc.latestValidatedRepoVersionMap({
+          preferredFolder: selectedMtarSource,
+          ids: installedIds
+        });
+      } catch(_e) {
+        repoMapValidated = {};
+      }
+      const repoMapDefault = Object.assign({}, repoMapMetadata, repoMapValidated);
 
       // === NOVO FLUXO PARA PRODUÇÃO (PRD) ===
       // Se o ambiente selecionado for PRD, comparar HML(installed) x PRD(ambiente)
@@ -7066,7 +7146,7 @@ CLI_NAME =  (CLI_BIN === 'cf') ? 'CF' : 'XS';
       if (v.code === 0) {
         xsCliVersion = (v.stdout || '').split(/\r?\n/).filter(Boolean)[0] || (v.stdout || '').trim();
       }
-      const repoVersion = await this.appsSvc.latestVersionFor(objectId);
+      const repoVersion = await this.appsSvc.latestAvailableMtarVersionFor(objectId, { preferredFolder: 'normal' });
       const executorUser = (req.session && req.session.user && req.session.user.username) ? req.session.user.username : null;
 
       await this.appsSvc.db.run(
@@ -7563,9 +7643,15 @@ async deployStream(req,res){
         repoVersion = found;
         send('Origem=QAS (Produção): será aplicada a MESMA versão de Homologação: ' + repoVersion);
       } else {
-        // homologação normal
-        repoVersion = await this.appsSvc.latestVersionFor(objectId);
-        send('Origem=TR (Homologação): última versão do repositório: ' + repoVersion);
+        // Homologação normal: usa a maior versão do Dependency.json que possui MTAR físico válido no repositório.
+        const selectedMtarSource = (info && info.packageSource) ? info.packageSource : 'normal';
+        repoVersion = await this.appsSvc.latestAvailableMtarVersionFor(objectId, { preferredFolder: selectedMtarSource, verboseValidationLog: true }, (t)=>send(t));
+        const dependencyVersion = await this.appsSvc.latestDependencyVersionFor(objectId);
+        if (dependencyVersion && repoVersion && String(dependencyVersion) !== String(repoVersion)) {
+          send('Origem=TR (Homologação): Dependency.json aponta ' + dependencyVersion + ', mas o MTAR válido encontrado foi ' + repoVersion + '.');
+        } else {
+          send('Origem=TR (Homologação): última versão MTAR válida do repositório: ' + repoVersion);
+        }
       }
     }
 
@@ -8190,7 +8276,7 @@ async rollbackLive(req,res){
   <b></b>
 </footer>
 <footer style="position:fixed; bottom:0; left:0; right:0; background:#f1f1f1; border-top:1px solid #ccc; text-align:center; padding:8px; font-size:13px; color:#555; font-family: Calibri, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V4.0</b>
+  <b>Desenvolvido por AMS Sustentação - Alliance Consultoria V5.0</b>
 </footer>
 </body></html>`);
         return;
@@ -8389,7 +8475,7 @@ try{ console.log('[audit] row inserted for', {empresa: env && (env.name||env.com
       let effectiveDeployVersion = (deployVersion !== undefined && deployVersion !== null) ? String(deployVersion).trim() : '';
       if (!effectiveDeployVersion) {
         try {
-          effectiveDeployVersion = String(await this.appsSvc.latestVersionFor(originalAppName) || '').trim();
+          effectiveDeployVersion = String(await this.appsSvc.latestAvailableMtarVersionFor(originalAppName, { preferredFolder: 'normal' }) || '').trim();
         } catch (_) {}
       }
       const headerLines = [
